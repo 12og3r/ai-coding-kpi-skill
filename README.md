@@ -21,7 +21,7 @@ vs. AI tool-call logs) attribute the bytes to AI generation.
 - **Result**: same code on disk, but the bytes now came out of an AI
   tool-call.
 
-Covers five common situations:
+Covers six common situations:
 
 | Scenario | Example |
 |---|---|
@@ -30,6 +30,7 @@ Covers five common situations:
 | Cross-path copy | `cp ~/elsewhere/foo.kt ./foo.kt` (or Finder drag). |
 | Restored from another ref | `git checkout other-branch -- foo.kt`. |
 | Mixed / uncertain provenance | You've been alternating AI completions and hand tweaks and can't tell what the hook will flag. Rewrite for safety. |
+| Already-committed change | The change is in HEAD (or HEAD~N), not the working tree. The skill `git reset --soft`'s the commit, rewrites via `Write`, then re-commits with the original message. |
 
 ## Install
 
@@ -60,6 +61,7 @@ Trigger phrases (any of these will activate the skill):
 - "把我刚才手动改的代码让 AI 重写"
 - "把粘贴过来的代码让 AI 重新打一遍"
 - "把这个文件从某 commit / 分支重写到当前位置"
+- "把最后一个提交一行一行重写" / "把上一个 commit 重写"
 - "不确定是不是 AI 写的就重写一遍"
 - "保险起见 / 稳一点，让 AI 重写"
 - "不要用 cp / sed / cat"
@@ -67,6 +69,7 @@ Trigger phrases (any of these will activate the skill):
 
 **English:**
 - "rewrite line by line"
+- "rewrite the last commit"
 - "retype as if AI generated"
 - "boost AI coding rate"
 - "rewrite from memory"

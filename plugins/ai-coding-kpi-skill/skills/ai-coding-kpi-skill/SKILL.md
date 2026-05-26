@@ -1,6 +1,6 @@
 ---
 name: ai-coding-kpi-skill
-description: Use when the user wants Claude itself — not bash / cp / sed / git checkout / pasted text — to produce the bytes of a file via the Write tool, so that AI-coding-rate hooks attribute the change to AI generation. Triggers include users whose company runs a pre-commit / pre-push hook that diffs the working tree against AI-tool tool-call logs to measure an "AI coding rate" KPI; the user already typed, pasted, or shell-copied code (uncommitted diff, snippet from a teammate or webpage, file copied from another directory, file restored from another branch / commit, manually hand-fixed AI output) and wants the Write tool to retype every character so the hook sees it as AI-generated. Typical phrases: "一行一行重写"、"让 AI 重新写一遍"、"AI coding 率太低帮我刷一下"、"把另一个目录的文件一行一行覆盖到这里"、"把我刚才手动改的代码让 AI 重写"、"把粘贴过来的代码让 AI 重新打一遍"、"把这个文件从某 commit / 分支重写到当前位置"、"不要用 cp / sed / cat"、"你来写不是本地文件操作"、"rewrite line by line"、"retype as if AI generated"、"boost AI coding rate".
+description: Use when the user wants Claude itself — not bash / cp / sed / git checkout / pasted text — to produce the bytes of a file via the Write tool, so that AI-coding-rate hooks attribute the change to AI generation. Triggers include users whose company runs a pre-commit / pre-push hook that diffs the working tree against AI-tool tool-call logs to measure an "AI coding rate" KPI; the user already typed, pasted, or shell-copied code (uncommitted diff, snippet from a teammate or webpage, file copied from another directory, file restored from another branch / commit, manually hand-fixed AI output) and wants the Write tool to retype every character so the hook sees it as AI-generated; OR the user is uncertain how much of a file is AI-vs-human-written and wants a defensive full rewrite to guarantee 100% AI provenance. Typical phrases: "一行一行重写"、"让 AI 重新写一遍"、"AI coding 率太低帮我刷一下"、"把另一个目录的文件一行一行覆盖到这里"、"把我刚才手动改的代码让 AI 重写"、"把粘贴过来的代码让 AI 重新打一遍"、"把这个文件从某 commit / 分支重写到当前位置"、"不确定是不是 AI 写的就重写一遍"、"保险起见 / 稳一点 让 AI 重写"、"不要用 cp / sed / cat"、"你来写不是本地文件操作"、"rewrite line by line"、"retype as if AI generated"、"when in doubt rewrite to be safe"、"boost AI coding rate".
 ---
 
 # AI Coding KPI Skill
@@ -34,6 +34,8 @@ Trigger when the user signals **any** of:
 - "把粘贴过来的代码 / 同事发给我的代码让 AI 重新打一遍"
 - "把我刚才手动改 / 手动 fix 的代码让 AI 重写"
 - "从记忆里重新写出来" / "rewrite from memory"
+- "不确定是不是 AI 写的就重写一遍" / "保险起见 / 稳一点 让 AI 重写"
+  / "when in doubt, rewrite to be safe"
 
 Scenarios this covers:
 
@@ -48,6 +50,12 @@ Scenarios this covers:
    -- path/foo.kt`; same problem.
 5. **Comprehension drill** — user wants proof the model actually
    parsed the change line-by-line, not shuffled bytes through bash.
+6. **Mixed / uncertain provenance (defensive use)** — user has been
+   alternating AI completions and manual tweaks and can no longer tell
+   which lines the hook will flag as human. Rewriting the whole file
+   guarantees the post-state is 100% Write-tool-attributed, removing
+   the ambiguity. Use this when the cost of a wrong KPI hit outweighs
+   the cost of a redundant rewrite.
 
 **Do NOT use when:**
 - The user wants a real edit — don't destroy a working tree just to

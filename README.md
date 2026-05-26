@@ -21,7 +21,7 @@ vs. AI tool-call logs) attribute the bytes to AI generation.
 - **Result**: same code on disk, but the bytes now came out of an AI
   tool-call.
 
-Covers four common situations:
+Covers five common situations:
 
 | Scenario | Example |
 |---|---|
@@ -29,6 +29,7 @@ Covers four common situations:
 | Pasted snippet | You pasted from chat / docs / StackOverflow. |
 | Cross-path copy | `cp ~/elsewhere/foo.kt ./foo.kt` (or Finder drag). |
 | Restored from another ref | `git checkout other-branch -- foo.kt`. |
+| Mixed / uncertain provenance | You've been alternating AI completions and hand tweaks and can't tell what the hook will flag. Rewrite for safety. |
 
 ## Install
 
@@ -59,6 +60,8 @@ Trigger phrases (any of these will activate the skill):
 - "把我刚才手动改的代码让 AI 重写"
 - "把粘贴过来的代码让 AI 重新打一遍"
 - "把这个文件从某 commit / 分支重写到当前位置"
+- "不确定是不是 AI 写的就重写一遍"
+- "保险起见 / 稳一点，让 AI 重写"
 - "不要用 cp / sed / cat"
 - "你来写不是本地文件操作"
 
@@ -67,6 +70,7 @@ Trigger phrases (any of these will activate the skill):
 - "retype as if AI generated"
 - "boost AI coding rate"
 - "rewrite from memory"
+- "when in doubt, rewrite to be safe"
 
 Or just describe the situation:
 

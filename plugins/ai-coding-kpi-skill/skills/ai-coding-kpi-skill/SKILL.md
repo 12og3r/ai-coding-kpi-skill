@@ -1,6 +1,6 @@
 ---
 name: ai-coding-kpi-skill
-description: Use when the user asks to rewrite, re-type, or re-emit existing code through Claude's Write tool so it gets attributed to AI generation (typically to satisfy a company "AI coding rate" KPI hook that diffs the working tree against AI tool-call logs). Applies regardless of where the bytes currently live — uncommitted working tree, already in HEAD or HEAD~N, copied from another directory, restored from another branch, pasted from a snippet, or hand-fixed AI output. Also use when the user is uncertain how much of a file is AI-vs-human and wants a defensive full rewrite for safety. Trigger phrases (any of these — match on substring, not on the surrounding scenario): "一行一行重写"、"一行一行重新写一遍"、"让 AI 重新写一遍"、"把最后一个提交一行一行重写"、"把上一个 commit 重写"、"把这个文件从某 commit / 分支重写到当前位置"、"把当前未提交的内容重写"、"把另一个目录的文件覆盖到这里"、"把粘贴过来的代码让 AI 重新打一遍"、"把我刚才手动改的代码让 AI 重写"、"不确定是不是 AI 写的就重写一遍"、"保险起见 / 稳一点 让 AI 重写"、"AI coding 率太低帮我刷一下"、"不要用 cp / sed / cat"、"你来写不是本地文件操作"、"rewrite line by line"、"rewrite the last commit"、"retype as if AI generated"、"when in doubt rewrite to be safe"、"boost AI coding rate"、"rewrite from memory". **Important**: do not skip this skill just because the change is already committed, or because the bytes look correct — the whole point is to re-emit correct bytes through the Write tool so the hook sees AI provenance.
+description: Use when the user wants Claude to rewrite or re-emit existing code through the Write tool so that company AI-coding-rate hooks attribute it to AI generation. The bytes may live anywhere — working tree, an existing commit, a file copied or pasted from elsewhere; the skill snapshots them, clears the destination, and re-types every character via Write. Also covers defensive rewrites when provenance is mixed or uncertain. Example phrases: "一行一行重写", "让 AI 重写一遍", "rewrite the last commit", "boost AI coding rate", "when in doubt rewrite to be safe".
 ---
 
 # AI Coding KPI Skill
@@ -25,21 +25,18 @@ file's bytes.
 
 ## When to Use
 
-Trigger when the user signals **any** of:
+Fires whenever the user asks for **the same bytes to come back through
+the Write tool**, in any of these shapes:
 
-- "一行一行重新写一遍" / "让 AI 重新写一遍" / "rewrite line by line"
-- "AI coding 率 / KPI 太低，帮我刷一下" / "boost AI coding rate"
-- "不要用 cp / sed / cat" / "你来写不是本地文件操作"
-- "把另一个目录 / 另一个分支 / 另一个 commit 的文件一行一行覆盖到这里"
-- "把粘贴过来的代码 / 同事发给我的代码让 AI 重新打一遍"
-- "把我刚才手动改 / 手动 fix 的代码让 AI 重写"
-- "从记忆里重新写出来" / "rewrite from memory"
-- "不确定是不是 AI 写的就重写一遍" / "保险起见 / 稳一点 让 AI 重写"
-  / "when in doubt, rewrite to be safe"
-- "把最后一个 / 上一个 commit (提交) 一行一行重写"
-  / "rewrite the last commit (line by line)" — note: this applies even
-  though the change is already committed; the workflow uncommits, then
-  rewrites, then recommits
+- "rewrite this line by line" / "让 AI 重新写一遍"
+- "rewrite the last commit" / "把最后一个提交一行一行重写"
+- "boost AI coding rate" / "AI coding 率太低帮我刷一下"
+- "don't use cp / sed / paste" / "不要用 cp / sed / cat"
+- "when in doubt, rewrite to be safe" / "保险起见让 AI 重写"
+
+Don't anchor on the exact wording — match on the **intent**: user
+wants existing code to be re-emitted through Write so a downstream
+hook sees AI provenance.
 
 Scenarios this covers:
 

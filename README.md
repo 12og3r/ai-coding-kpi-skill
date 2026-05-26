@@ -5,7 +5,7 @@ A Claude Code skill that **re-types your already-written code through the
 vs. AI tool-call logs) attribute the bytes to AI generation.
 
 > 一些公司用 hook + diff 比对的方式统计员工的 "AI coding 率" KPI：
-> 把 working tree 的改动跟 AI 工具的 tool-call 日志做对比，差出来的部分
+> 把工作区的改动跟 AI 工具的 tool-call 日志做对比，差出来的部分
 > 就算"人写的"。问题是 AI 经常写错，手动改一下往往比让 AI 反复改更快 ——
 > 但手动改完，AI coding 率就掉了。
 >

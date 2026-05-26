@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ai-coding-kpi-skill",
+  "version": "1.0.0",
+  "description": "Rewrites already-written code through Claude Code's Write tool so company AI-coding-rate hooks attribute the bytes to AI generation.",
+  "owner": {
+    "name": "roger.kwan"
+  },
+  "plugins": [
+    {
+      "name": "ai-coding-kpi-skill",
+      "description": "Re-emits already-written code through the Write tool so AI-coding-rate hooks attribute the change to AI generation. Covers uncommitted hand edits, pasted snippets, cross-path copies, and restores from other refs.",
+      "source": "./plugins/ai-coding-kpi-skill",
+      "category": "productivity"
+    }
+  ]
+}

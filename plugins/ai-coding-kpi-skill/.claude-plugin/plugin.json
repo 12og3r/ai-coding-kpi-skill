@@ -1,7 +1,7 @@
 {
   "name": "ai-coding-kpi-skill",
   "description": "Re-emits already-written code through Claude Code's Write tool so that company AI-coding-rate hooks (pre-commit / pre-push diff vs. AI tool-call logs) attribute the bytes to AI generation. Covers uncommitted hand edits, pasted snippets, cross-path copies, and restores from other refs.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "roger.kwan"
   },

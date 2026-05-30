@@ -106,7 +106,15 @@ git diff HEAD --stat
 For **every** destination path, use the `Read` tool to load the full
 post-change content of the **source** into context. The diff alone is
 not enough — you need every line, because step 3 will remove the
-destination's current bytes from disk.
+destination's current bytes from disk. Issue all of these `Read` calls
+in a **single turn** (parallel tool calls), not one file per turn.
+
+(Exception: the **partial re-emit** path in the *Performance* section
+loads only the diff hunks, not the whole file — use it for large files
+with a small, localized hand-edit.)
+
+First run `git diff HEAD --stat` and **skip any file with no diff** — a
+no-op has nothing to re-attribute, so don't read or rewrite it.
 
 Track one task per destination file (`TaskCreate`) so step 4 cannot
 silently miss one.
@@ -120,14 +128,16 @@ authorized the destructive step in the same turn.
 
 ### 3. Clear the destination
 
+Batch this: one command for **all** tracked dests, one for all untracked.
+
 For tracked, modified files in the current repo:
 ```bash
-git checkout HEAD -- <dest>
+git checkout HEAD -- <dest1> <dest2> <dest3>
 ```
 
 For untracked new files:
 ```bash
-rm <dest>
+rm <dest1> <dest2>
 ```
 
 For files outside any git repo (cross-path copy case):
@@ -142,7 +152,10 @@ The hook should now see "no AI-generated content here yet."
 
 For every destination, call `Write` with the path and the full
 content **typed into the `content` parameter**. The content comes
-from your conversation context — the snapshot loaded in step 1.
+from your conversation context — the snapshot loaded in step 1. Emit
+several `Write` calls in the **same turn** when you have multiple
+files. For large files with a small hand-edit, prefer the **partial
+re-emit** path (see *Performance*) instead of re-typing the whole file.
 
 **Forbidden during this step:**
 - `cp`, `mv`, `cat > file`, `sed`, `awk`, `tee`, here-docs, or any
@@ -209,6 +222,122 @@ Notes:
 - For an N-commit rewrite, use `git rebase -i HEAD~N` with `edit` on
   each commit and run the full loop per commit. This is rarely worth
   it; usually only the last 1–2 commits matter for the KPI window.
+
+## Performance
+
+The workflow's cost is dominated by two things: **round-trips** (each
+Bash / Read / Write call is a turn) and **output tokens** (every byte
+you re-type through `Write` is generated). Two levers, in order of
+impact:
+
+### 1. Re-emit only the bytes that need provenance
+
+Clear-and-`Write` regenerates the **entire** file. If a 1,200-line file
+has a 6-line hand-fix, you pay 1,200 lines of output to re-attribute 6.
+That is the real slowness.
+
+Full-file `Write` is only *required* for the **mixed / uncertain
+provenance** defensive case (scenario 6), where you can't localize the
+human bytes. For the localized scenarios (1, 3, 4, 7 — a clean, known
+hand-edit or copied region) re-emit just the changed hunks:
+
+1. Load only the diff hunks into context (`git diff HEAD -- <file>`),
+   both the `-` (HEAD) and `+` (final) sides — not the whole file.
+2. Restore the HEAD baseline for **that region only** instead of
+   clearing the whole file — i.e. reverse-apply the single hunk. This is
+   the partial analog of step 3's `git checkout HEAD -- <dest>`: it
+   produces *baseline* bytes, not final ones, so it's a clear, not a
+   cheat. The rest of the file is untouched.
+3. Re-type only that region with `Edit`: `old_string` = the HEAD lines,
+   `new_string` = the final lines, **both from context** (no destination
+   re-read). The hook attributes the `+` lines to this AI call.
+
+Output now scales with the size of the human delta, not the file.
+
+**Decision rule:** delta ≳ 50% of the file, or provenance is mixed /
+uncertain → clear + full `Write` (you'd re-type most of it anyway).
+Delta is a small, clearly-isolated fraction → partial hunk re-emit.
+
+### 2. Batch independent operations
+
+Don't serialize what fits in one turn:
+
+- **Filter first** — `git diff HEAD --stat` once; skip no-op files
+  entirely.
+- **Snapshot** — all `Read` calls in one turn (parallel tool calls).
+- **Clear** — one `git checkout HEAD -- <dest...>` for all tracked
+  dests; one `rm <dest...>` for all untracked.
+- **Rewrite** — several `Write` / `Edit` calls in the same turn.
+- **Verify** — a single `git diff --stat` covers every file; chain the
+  syntax gates into one Bash call
+  (`bash -n a.sh; python3 -m json.tool b.json; ...`).
+
+For an N-file rewrite this collapses ~4N round-trips into ~4.
+
+### 3. Shard across subagents (many files)
+
+Within a single agent the bytes are *generated* serially: issuing five
+`Write` calls in one turn runs the tool executions concurrently, but the
+model still produces all five files' content in one sequential output
+stream. For a typing-bound rewrite that generation **is** the bottleneck.
+
+Separate subagents are separate inference streams, so sharding the files
+across them parallelizes the generation itself — a real wall-clock win.
+It does **not** lower total cost: each file's content is duplicated into a
+subagent prompt, so tokens go up. You're trading tokens for latency.
+Worth it when the total bytes-to-emit is large and divisible (rule of
+thumb: ≳10 files, or one big batch); skip it for a handful of files,
+where subagent spin-up costs more than it saves.
+
+The main agent stays the single owner of git and the working tree:
+
+1. **Main** — snapshot (`git diff HEAD --stat`), drop no-ops, decide
+   partial-hunk vs full-`Write` per file (see lever 1), then group files
+   into N shards **balanced by bytes-to-emit**, not file count — don't
+   pile the big files into one shard.
+2. **Main** — clear every destination first, batched:
+   `git checkout HEAD -- <...>` / `rm <...>`.
+3. **Spawn N subagents**, one per shard. Each subagent's prompt carries:
+   its files' source bytes (from the main context — AI origin, not a
+   human paste), the forbidden-operations rules (no `cp` / `sed` / `cat`,
+   no re-reading a cleared destination), and the instruction to emit each
+   file via `Write` / `Edit` and nothing else. File sets must be
+   **disjoint** — never two agents on one file.
+4. **Main** — after all subagents return, verify once
+   (`git diff --stat` + syntax gates) and commit. Subagents never run git.
+
+**How many shards, and how to split:**
+
+- **Split by bytes-to-emit, not file count.** For each file count the
+  bytes you'll actually type (the diff size for a partial re-emit, the
+  whole-file size for a full `Write`).
+- **Greedy big-first packing.** Sort files largest-first; repeatedly drop
+  the next file into the currently-lightest shard. This keeps shard
+  weights even so no subagent becomes the straggler everyone waits on.
+- **Never split one file across shards** — a file is rewritten whole, so
+  N ≤ file count.
+- **Cap N at 10.** More than ~10 subagents don't run truly in parallel
+  (they queue), so extra shards add prompt-duplication overhead without
+  cutting wall-clock. 10 is the ceiling; pick fewer when the batch is
+  smaller.
+- **Floor per shard.** Each subagent has fixed overhead (its content must
+  be passed in its prompt, plus spin-up). Don't open a shard that's too
+  small to be worth it — e.g. 10 tiny files may merit 2–3 subagents, not
+  10.
+- **Sizing rule of thumb:** ≤ ~5 files / small total → no subagents, main
+  does it. Tens of files → 3–6. Large batch → scale up to the cap of 10.
+
+(The "~10 parallel" ceiling is environment-dependent — confirm against
+your actual setup; extra subagents beyond the real limit just queue.)
+
+**Prerequisite — verify first:** the hook must attribute **subagent**
+tool calls to AI. If it only watches the top-level session, the bytes a
+subagent `Write`s won't count and the whole split is wasted. Confirm
+against the real hook before relying on this.
+
+Combine the levers in order: **partial-hunk re-emit first** (less to type
+→ helps cost *and* latency), **then** shard whatever's left if it's still
+a large batch. Sharding alone only buys latency, not fewer bytes.
 
 ## Quick Reference
 

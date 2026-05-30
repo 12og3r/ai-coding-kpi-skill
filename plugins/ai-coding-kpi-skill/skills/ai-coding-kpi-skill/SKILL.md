@@ -306,6 +306,30 @@ The main agent stays the single owner of git and the working tree:
 4. **Main** — after all subagents return, verify once
    (`git diff --stat` + syntax gates) and commit. Subagents never run git.
 
+**How many shards, and how to split:**
+
+- **Split by bytes-to-emit, not file count.** For each file count the
+  bytes you'll actually type (the diff size for a partial re-emit, the
+  whole-file size for a full `Write`).
+- **Greedy big-first packing.** Sort files largest-first; repeatedly drop
+  the next file into the currently-lightest shard. This keeps shard
+  weights even so no subagent becomes the straggler everyone waits on.
+- **Never split one file across shards** — a file is rewritten whole, so
+  N ≤ file count.
+- **Cap N at 10.** More than ~10 subagents don't run truly in parallel
+  (they queue), so extra shards add prompt-duplication overhead without
+  cutting wall-clock. 10 is the ceiling; pick fewer when the batch is
+  smaller.
+- **Floor per shard.** Each subagent has fixed overhead (its content must
+  be passed in its prompt, plus spin-up). Don't open a shard that's too
+  small to be worth it — e.g. 10 tiny files may merit 2–3 subagents, not
+  10.
+- **Sizing rule of thumb:** ≤ ~5 files / small total → no subagents, main
+  does it. Tens of files → 3–6. Large batch → scale up to the cap of 10.
+
+(The "~10 parallel" ceiling is environment-dependent — confirm against
+your actual setup; extra subagents beyond the real limit just queue.)
+
 **Prerequisite — verify first:** the hook must attribute **subagent**
 tool calls to AI. If it only watches the top-level session, the bytes a
 subagent `Write`s won't count and the whole split is wasted. Confirm

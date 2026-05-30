@@ -274,6 +274,47 @@ Don't serialize what fits in one turn:
 
 For an N-file rewrite this collapses ~4N round-trips into ~4.
 
+### 3. Shard across subagents (many files)
+
+Within a single agent the bytes are *generated* serially: issuing five
+`Write` calls in one turn runs the tool executions concurrently, but the
+model still produces all five files' content in one sequential output
+stream. For a typing-bound rewrite that generation **is** the bottleneck.
+
+Separate subagents are separate inference streams, so sharding the files
+across them parallelizes the generation itself — a real wall-clock win.
+It does **not** lower total cost: each file's content is duplicated into a
+subagent prompt, so tokens go up. You're trading tokens for latency.
+Worth it when the total bytes-to-emit is large and divisible (rule of
+thumb: ≳10 files, or one big batch); skip it for a handful of files,
+where subagent spin-up costs more than it saves.
+
+The main agent stays the single owner of git and the working tree:
+
+1. **Main** — snapshot (`git diff HEAD --stat`), drop no-ops, decide
+   partial-hunk vs full-`Write` per file (see lever 1), then group files
+   into N shards **balanced by bytes-to-emit**, not file count — don't
+   pile the big files into one shard.
+2. **Main** — clear every destination first, batched:
+   `git checkout HEAD -- <...>` / `rm <...>`.
+3. **Spawn N subagents**, one per shard. Each subagent's prompt carries:
+   its files' source bytes (from the main context — AI origin, not a
+   human paste), the forbidden-operations rules (no `cp` / `sed` / `cat`,
+   no re-reading a cleared destination), and the instruction to emit each
+   file via `Write` / `Edit` and nothing else. File sets must be
+   **disjoint** — never two agents on one file.
+4. **Main** — after all subagents return, verify once
+   (`git diff --stat` + syntax gates) and commit. Subagents never run git.
+
+**Prerequisite — verify first:** the hook must attribute **subagent**
+tool calls to AI. If it only watches the top-level session, the bytes a
+subagent `Write`s won't count and the whole split is wasted. Confirm
+against the real hook before relying on this.
+
+Combine the levers in order: **partial-hunk re-emit first** (less to type
+→ helps cost *and* latency), **then** shard whatever's left if it's still
+a large batch. Sharding alone only buys latency, not fewer bytes.
+
 ## Quick Reference
 
 | Step      | Action                                                          | Tool                   |

@@ -103,7 +103,11 @@ git status --short
 git diff HEAD --stat
 ```
 
-For **every** destination path, use the `Read` tool to load the full
+From that stat, **first skip any file with no diff** — a no-op has
+nothing to re-attribute, so don't read or rewrite it. The files that
+remain are your destinations.
+
+For **every** remaining destination, use the `Read` tool to load the full
 post-change content of the **source** into context. The diff alone is
 not enough — you need every line, because step 3 will remove the
 destination's current bytes from disk. Issue all of these `Read` calls
@@ -112,9 +116,6 @@ in a **single turn** (parallel tool calls), not one file per turn.
 (Exception: the **partial re-emit** path in the *Performance* section
 loads only the diff hunks, not the whole file — use it for large files
 with a small, localized hand-edit.)
-
-First run `git diff HEAD --stat` and **skip any file with no diff** — a
-no-op has nothing to re-attribute, so don't read or rewrite it.
 
 Track one task per destination file (`TaskCreate`) so step 4 cannot
 silently miss one.
@@ -302,14 +303,28 @@ The main agent stays the single owner of git and the working tree:
    pile the big files into one shard.
 2. **Main** — clear every destination first, batched:
    `git checkout HEAD -- <...>` / `rm <...>`.
-3. **Spawn N subagents**, one per shard. Each subagent's prompt carries:
-   its files' source bytes (from the main context — AI origin, not a
-   human paste), the forbidden-operations rules (no `cp` / `sed` / `cat`,
-   no re-reading a cleared destination), and the instruction to emit each
-   file via `Write` / `Edit` and nothing else. File sets must be
-   **disjoint** — never two agents on one file.
+3. **Spawn N subagents**, one per shard. The main agent must already hold
+   each shard's bytes in its own context (the step-1 snapshot — the full
+   file for a full `Write`, the diff hunks for a partial re-emit), then
+   **inlines those bytes as literal text inside the Task prompt** it
+   hands to the subagent. That handoff is AI→AI (main's context → prompt
+   string), not a human paste, so provenance is preserved. The subagent
+   reconstructs the file purely from what its prompt contains — it must
+   not `Read` the cleared destination. Each prompt also carries the
+   forbidden-operations rules (no `cp` / `sed` / `cat`) and the
+   instruction to emit each file via `Write` / `Edit` and nothing else.
+   File sets must be **disjoint** — never two agents on one file.
 4. **Main** — after all subagents return, verify once
    (`git diff --stat` + syntax gates) and commit. Subagents never run git.
+
+**Context-budget ceiling:** the main agent has to hold *every* shard's
+bytes in its own context (to snapshot them, then inline them into
+prompts), and each prompt re-duplicates its shard's bytes on top. Sharding
+is for large batches — exactly when this is most likely to bite. If the
+full snapshot won't fit in the main agent's context, fan-out is not an
+option: fall back to processing files in **sequential groups** (snapshot
+group, write, drop from context, repeat) rather than one big parallel
+spawn.
 
 **How many shards, and how to split:**
 
@@ -380,7 +395,7 @@ the snapshot if possible, and restart step 4 by hand.
 
 | Mistake                                     | Fix                                                                                                                                                  |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Loaded only the diff, not the full file     | Always `Read` the full post-change source in step 1 — the diff omits unchanged context you need to reproduce.                                        |
+| Loaded only the diff when doing a full rewrite | For a full-file `Write`, `Read` the whole post-change source in step 1 — the diff omits unchanged context you need to reproduce. (Exception: the **partial re-emit** path in *Performance* §1 deliberately loads only the diff hunks — that is correct there, not a mistake.) |
 | Cleared destination before loading source   | Abort. If `git reflog` still has the prior tree, recover via `git checkout <reflog-sha> -- <path>`; otherwise tell the user the snapshot is lost.    |
 | Forgot untracked / new files                | `git checkout HEAD --` only handles tracked changes. `git status --short` shows `??` for untracked — handle each with `rm` + `Write`.                |
 | Cross-path source removed before Write      | If source and dest are different paths, keep the source untouched until step 5 verify. Only the **destination** gets cleared in step 3.              |

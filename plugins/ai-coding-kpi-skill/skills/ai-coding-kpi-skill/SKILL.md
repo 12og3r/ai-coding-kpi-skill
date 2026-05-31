@@ -27,7 +27,8 @@ file's bytes.
 ## When to Use
 
 Fires whenever the user asks for **the same bytes to come back through
-the Write tool**, in any of these shapes:
+an AI tool call** (`Write`, or `Edit` for the partial path), in any of
+these shapes:
 
 - "rewrite this line by line" / "让 AI 重新写一遍"
 - "rewrite the last commit" / "把最后一个提交一行一行重写"
@@ -36,8 +37,8 @@ the Write tool**, in any of these shapes:
 - "when in doubt, rewrite to be safe" / "保险起见让 AI 重写"
 
 Don't anchor on the exact wording — match on the **intent**: user
-wants existing code to be re-emitted through Write so a downstream
-hook sees AI provenance.
+wants existing code to be re-emitted through an AI tool call (`Write` or
+`Edit`) so a downstream hook sees AI provenance.
 
 Scenarios this covers:
 
@@ -161,14 +162,15 @@ rm <dest>     # or move aside to a backup path if user wants safety
 After this, the destination either does not exist or matches HEAD.
 The hook should now see "no AI-generated content here yet."
 
-### 4. Rewrite each destination via the Write tool
+### 4. Rewrite each destination via the Write or Edit tool
 
-For every destination, call `Write` with the path and the full
-content **typed into the `content` parameter**. The content comes
-from your conversation context — the snapshot loaded in step 1. Emit
-several `Write` calls in the **same turn** when you have multiple
-files. For large files with a small hand-edit, prefer the **partial
-re-emit** path (see *Performance*) instead of re-typing the whole file.
+The default is `Write`: call it with the path and the full content
+**typed into the `content` parameter**, sourced from your conversation
+context (the snapshot from step 1). Emit several `Write` calls in the
+**same turn** when you have multiple files. For large files with a small,
+localized hand-edit, prefer the **partial re-emit** path (Performance
+§1 — two `Edit`s per hunk) instead of re-typing the whole file; both
+`Write`'s `content` and `Edit`'s `new_string` count as AI tool calls.
 
 **Forbidden during this step:**
 - `cp`, `mv`, `cat > file`, `sed`, `awk`, `tee`, here-docs, or any

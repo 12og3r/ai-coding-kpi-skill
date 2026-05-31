@@ -101,8 +101,11 @@ re-attribution.
 
 ## When NOT to use this
 
-- The change is too large to fit in Claude's context (rule of thumb:
-  post-change file size < 20% of remaining context).
+- The bytes you'd re-emit are too large to fit in Claude's context. The
+  threshold is per-path: a full `Write` re-emits the whole file (rule of
+  thumb: skip if post-change file size > 50% of remaining context),
+  while a partial re-emit types only the changed hunks, so it's gated on
+  diff size, not file size — a large file with a small hand-edit is fine.
 - You're trying to defeat a **fraud-aware** audit, not a KPI-tracking
   hook. This skill is for the latter — it doesn't lie about what was
   written, it just re-emits identical bytes through a different tool so

@@ -515,9 +515,12 @@ dependency is exactly why it must be **serial**, not parallel.
    - source != dest: leave the source in place; no copy needed.
    wc -l <source-snapshot>      # total lines, to assign ranges — main
                                 #   never loads the content itself
-1. Main: pick slice boundaries on LINE boundaries, preferably at a
-   unique-looking line (not a bare `}` or blank line), so the anchor in
-   step 3 stays unique. Record [start,end] line ranges, in order.
+1. Main: split into slices at roughly equal LINE intervals — this is
+   purely positional (line numbers from `wc -l`), so main still never
+   reads the content. Don't try to pick "nice" boundaries; main can't see
+   the lines to judge them. Anchor uniqueness is handled entirely by the
+   subagent in step 3 (it widens its anchor as needed). Record [start,end]
+   line ranges, in order.
 2. Main → subagent 1 (serial): "Read(<snapshot>, offset=start1, limit=len1),
    then Write(<dest>, <those exact bytes>)." Subagent loads only slice 1.
 3. Main → subagent K (K≥2, one at a time, in order): "Read(<snapshot>,
@@ -525,6 +528,12 @@ dependency is exactly why it must be **serial**, not parallel.
    for your anchor. Then Edit(<dest>, old_string=<that on-disk tail>,
    new_string=<same tail> + <slice K>)." The append leaves earlier slices
    untouched. Widen the anchor until old_string matches exactly once.
+   (Reading <dest> here is NOT the forbidden "re-read the destination" in
+   Red Flags. That ban is about reading a *cleared* dest to recover bytes
+   you should have snapshotted. Here you read the *partially-built* dest
+   only to locate the append point, and its content came from the prior
+   subagent's own `Write`/`Edit` — AI output, not a human edit or a
+   snapshot you skipped. Your slice's bytes still come from <snapshot>.)
 4. Main: after the last slice, verify the whole file reconstructs the
    intended content (git diff / diff -q against the snapshot), then rm the
    scratch snapshot and commit.
@@ -543,10 +552,9 @@ Rules specific to this lever:
   the hook attributes all of it to AI. The `cp` snapshot and final commit
   touch no re-attributed bytes.
 - **Same subagent prerequisite as §3** — the hook must credit subagent
-  tool calls. If it only watches the top-level session, run the serial
-  chain in the main agent across turns instead (same Write-then-append
-  sequence; rely on context dropping between turns), or don't use this
-  lever.
+  tool calls. If it only watches the top-level session, this lever does
+  not apply: its whole benefit is a fresh per-slice context, which only
+  separate subagents give you. Don't use it then.
 - **Atomicity** — a failed middle slice leaves the file half-built. The
   step 4 verify is mandatory; on mismatch, re-clear and restart from
   slice 1.
@@ -571,7 +579,10 @@ Stop and restart if you catch yourself about to:
   `git restore --source=<ref>` to retrieve what you just cleared
 - run `Read` on the just-cleared destination to "remind yourself"
   (load the **source** in step 1 — if you skipped that, abort and ask
-  the user to undo the clear)
+  the user to undo the clear). Exception: Performance §4's serial slicing
+  reads the *partially-built* dest only to find the append point — that's
+  fine, the bytes still come from the snapshot, not from re-reading
+  cleared content you forgot to load.
 - pipe one file's content into another via `bash` to apply a known
   transformation
 - write a Python / Node one-liner whose only purpose is to produce

@@ -45,7 +45,7 @@ Scenarios this covers:
 1. **Uncommitted hand edits** — user fixed an AI mistake by typing;
    the working tree has correct content, but the hook saw human edits.
 2. **Pasted / external snippet** — user pasted from chat / docs /
-   StackOverflow; the bytes never went through a `Write` call.
+   StackOverflow; the bytes never went through a `Write` or `Edit` call.
 3. **Cross-path copy** — user ran `cp ~/elsewhere/foo.kt ./foo.kt`
    (or dragged in Finder); the destination has correct content but no
    AI provenance.
@@ -56,7 +56,8 @@ Scenarios this covers:
 6. **Mixed / uncertain provenance (defensive use)** — user has been
    alternating AI completions and manual tweaks and can no longer tell
    which lines the hook will flag as human. Rewriting the whole file
-   guarantees the post-state is 100% Write-tool-attributed, removing
+   (full `Write`, since the human bytes can't be localized) guarantees
+   the post-state is 100% AI-tool-attributed, removing
    the ambiguity. Use this when the cost of a wrong KPI hit outweighs
    the cost of a redundant rewrite.
 7. **Already-committed change** — the bytes are not in the working
@@ -495,7 +496,7 @@ the snapshot if possible, and restart step 4 by hand.
 | Loaded only the diff when doing a full rewrite | For a full-file `Write`, `Read` the whole post-change source in step 1 — the diff omits unchanged context you need to reproduce. (Exception: the **partial re-emit** path in *Performance* §1 deliberately loads only the diff hunks — that is correct there, not a mistake.) |
 | Cleared destination before loading source   | Abort. If `git reflog` still has the prior tree, recover via `git checkout <reflog-sha> -- <path>`; otherwise tell the user the snapshot is lost.    |
 | Forgot untracked / new files                | `git checkout HEAD --` only handles tracked changes. `git status --short` shows `??` for untracked — handle each with `rm` + `Write`.                |
-| Cross-path source removed before Write      | If source and dest are different paths, keep the source untouched until step 5 verify. Only the **destination** gets cleared in step 3.              |
+| Cross-path source removed before Write or Edit | If source and dest are different paths, keep the source untouched until step 5 verify. Only the **destination** gets cleared in step 3.              |
 | Wrote some files, forgot one                | Cross-check the `Task` list (one task per file) against `git status` before claiming completion.                                                     |
 | Skipped step 5 verification                 | Run `git diff` after rewrites — its output should match the original logical change. If a hunk is missing or shifted, you mis-remembered a line.     |
 

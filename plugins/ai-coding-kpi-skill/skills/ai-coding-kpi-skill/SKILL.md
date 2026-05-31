@@ -199,7 +199,7 @@ with two extra git operations bracketing it:
    git reset --soft <commit>^       # uncommit but keep changes staged
    git checkout HEAD -- <dest>      # revert each file to its pre-commit state
 2. confirm with user
-3. (destination is now pre-commit state; staged changes still in index — `git reset` them too if needed)
+3. (each <dest> is now at pre-commit state **and unstaged** — `git checkout HEAD -- <dest>` rewrote both the working tree and the index entry. Only unrelated staged files, if any, remain in the index.)
 4. Write each file from your snapshot context
 5. verify (git diff HEAD should reconstruct the original commit's diff)
    git add <files>
@@ -207,15 +207,20 @@ with two extra git operations bracketing it:
 ```
 
 Notes:
-- `git reset --soft HEAD~1` moves HEAD back one commit, leaves the
-  changes in the index, leaves the working tree untouched. Run
-  `git reset` (mixed) afterwards if you also want the index clean so
-  step 3's `git checkout HEAD -- <dest>` actually reverts the file on
-  disk to pre-commit state. (After `--soft`, the index still holds
-  the post-commit version; without an additional `git reset`,
-  `git checkout HEAD -- <dest>` will pull from the index, not from the
-  new HEAD.) Easier: use `git reset HEAD~1` (mixed, the default) to
-  unstage too, then proceed.
+- `git reset --soft HEAD~1` moves HEAD back one commit, keeps the
+  changes staged in the index, and leaves the working tree untouched.
+  To then revert a `<dest>` on disk to its pre-commit state,
+  `git checkout HEAD -- <dest>` is sufficient on its own — no extra
+  `git reset` is needed. Given an explicit tree-ish (`HEAD`, now
+  `<commit>^`), `checkout` reads the file from that commit and writes it
+  to **both** the working tree and the index; it does **not** read from
+  the index. So that single command reverts the file *and* unstages it
+  in one shot. (Contrast `git checkout -- <dest>` *without* a tree-ish,
+  which restores from the index — that form would pull the still-staged
+  post-commit bytes, the opposite of what you want. Don't use it here.)
+  If you'd rather wipe the whole index first, `git reset HEAD~1`
+  (mixed, the default) unstages everything; the subsequent
+  `git checkout HEAD -- <dest>` then does the identical revert.
 - `ORIG_HEAD` is the SHA of the commit you just reset away — handy
   for `git commit --reuse-message=ORIG_HEAD` to preserve the original
   commit message verbatim.

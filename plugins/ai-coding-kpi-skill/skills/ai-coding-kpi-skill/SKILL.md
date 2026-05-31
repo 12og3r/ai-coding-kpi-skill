@@ -220,7 +220,15 @@ with two extra git operations bracketing it:
    git checkout HEAD -- <del1> <del2> ...
 2. confirm with user
 3. (modified <dest>s are now at pre-commit state **and unstaged**; new files are gone from index and disk; deleted files are restored to their pre-commit content. Only unrelated staged files, if any, remain in the index.)
-4. Write each file from your snapshot context
+4. re-emit each file. Two options:
+   - full-file `Write` from your snapshot context; or
+   - if the commit changed only a few lines of a large file, a partial
+     re-emit is cheaper. Note disk is **already at the pre-commit
+     baseline** here (step 1's `git checkout HEAD -- <mod>` reverted it),
+     so unlike Performance §1 you skip Edit ① — a **single Edit per hunk**
+     (`old_string` = baseline lines, `new_string` = the commit's final
+     lines, both from your `<commit>` snapshot) re-attributes the change.
+     Widen context lines so each `old_string` is unique.
 5. verify (git diff HEAD should reconstruct the original commit's diff)
    git add <files>
    git commit -m "<original message>" (or --reuse-message=ORIG_HEAD)
@@ -327,7 +335,9 @@ Delta is a small, clearly-isolated fraction → partial hunk re-emit.
 
 Don't serialize what fits in one turn:
 
-- **Filter first** — `git diff HEAD --stat` once; skip no-op files
+- **Filter first** — one `git diff HEAD --stat` **plus** `git status
+  --short`; a file is a no-op only if it appears in neither (an untracked
+  `??` file shows only in `git status --short`, per step 1). Skip no-ops
   entirely.
 - **Snapshot** — all `Read` calls in one turn (parallel tool calls).
 - **Clear** — one `git checkout HEAD -- <dest...>` for all tracked
@@ -406,9 +416,9 @@ large batch without the main context becoming the ceiling.
 
 **How many shards, and how to split:**
 
-- **Split by bytes-to-emit, not file count.** For each file count the
-  bytes you'll actually type (the diff size for a partial re-emit, the
-  whole-file size for a full `Write`).
+- **Split by bytes-to-emit, not file count.** Only partial-`Edit` files
+  are sharded (full-`Write` files stay with main), so the weight of each
+  is its **diff size** — the bytes you'll actually type via Edit ①②.
 - **Greedy big-first packing.** Sort files largest-first; repeatedly drop
   the next file into the currently-lightest shard. This keeps shard
   weights even so no subagent becomes the straggler everyone waits on.

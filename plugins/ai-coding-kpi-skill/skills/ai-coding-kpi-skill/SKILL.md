@@ -247,16 +247,30 @@ provenance** defensive case (scenario 6), where you can't localize the
 human bytes. For the localized scenarios (1, 3, 4, 7 — a clean, known
 hand-edit or copied region) re-emit just the changed hunks:
 
-1. Load only the diff hunks into context (`git diff HEAD -- <file>`),
-   both the `-` (HEAD) and `+` (final) sides — not the whole file.
-2. Restore the HEAD baseline for **that region only** instead of
-   clearing the whole file — i.e. reverse-apply the single hunk. This is
-   the partial analog of step 3's `git checkout HEAD -- <dest>`: it
-   produces *baseline* bytes, not final ones, so it's a clear, not a
-   cheat. The rest of the file is untouched.
-3. Re-type only that region with `Edit`: `old_string` = the HEAD lines,
-   `new_string` = the final lines, **both from context** (no destination
-   re-read). The hook attributes the `+` lines to this AI call.
+1. Record the diff to a scratch file as a **read-only reference** and
+   `Read` it: `git diff HEAD -- <file> > /tmp/changes.diff`. You need
+   both the `-` (HEAD) and `+` (final) side of every hunk. The file is
+   reference only — **never `git apply` it in either direction**;
+   applying it routes bytes onto disk through git, outside any AI tool
+   call, so the hook won't attribute them. Keep it under `/tmp` (not the
+   working tree) and `rm` it when done.
+2. For each hunk, make **two `Edit` calls with your own tool — no git**:
+   - **Edit ① (clear):** `old_string` = the final lines (what's on disk
+     now), `new_string` = the HEAD lines. This reverts the region to
+     baseline using Edit itself.
+   - **Edit ② (re-attribute):** `old_string` = the HEAD lines,
+     `new_string` = the final lines. The hook attributes these `+` lines
+     to this AI call.
+   Net disk is unchanged; Edit ①'s bytes equal HEAD, so they fall
+   outside the final diff and are ignored.
+3. `rm /tmp/changes.diff` when the file is done.
+
+Why two Edits: disk already holds the final bytes and `Edit` rejects
+`old_string == new_string`, so you can't re-emit a line onto itself. You
+must first move the region off-final (Edit ①) then back (Edit ②). Two
+Edits per hunk is the minimum for a pure-tool re-emit — **never
+substitute `git apply` for either direction**; that's the lazy shortcut
+that loses attribution.
 
 Output now scales with the size of the human delta, not the file.
 
@@ -289,42 +303,43 @@ stream. For a typing-bound rewrite that generation **is** the bottleneck.
 
 Separate subagents are separate inference streams, so sharding the files
 across them parallelizes the generation itself — a real wall-clock win.
-It does **not** lower total cost: each file's content is duplicated into a
-subagent prompt, so tokens go up. You're trading tokens for latency.
-Worth it when the total bytes-to-emit is large and divisible (rule of
-thumb: ≳10 files, or one big batch); skip it for a handful of files,
-where subagent spin-up costs more than it saves.
+It does **not** lower total cost (more agents, more fixed overhead);
+you're trading some extra work for latency. Worth it when the total
+bytes-to-emit is large and divisible (rule of thumb: ≳10 files, or one
+big batch); skip it for a handful of files, where subagent spin-up costs
+more than it saves.
 
-The main agent stays the single owner of git and the working tree:
+The main agent owns only the shared diff file and the final commit; each
+subagent does its own reads and Edits on its own files:
 
-1. **Main** — snapshot (`git diff HEAD --stat`), drop no-ops, decide
-   partial-hunk vs full-`Write` per file (see lever 1), then group files
-   into N shards **balanced by bytes-to-emit**, not file count — don't
-   pile the big files into one shard.
-2. **Main** — clear every destination first, batched:
-   `git checkout HEAD -- <...>` / `rm <...>`.
-3. **Spawn N subagents**, one per shard. The main agent must already hold
-   each shard's bytes in its own context (the step-1 snapshot — the full
-   file for a full `Write`, the diff hunks for a partial re-emit), then
-   **inlines those bytes as literal text inside the Task prompt** it
-   hands to the subagent. That handoff is AI→AI (main's context → prompt
-   string), not a human paste, so provenance is preserved. The subagent
-   reconstructs the file purely from what its prompt contains — it must
-   not `Read` the cleared destination. Each prompt also carries the
-   forbidden-operations rules (no `cp` / `sed` / `cat`) and the
-   instruction to emit each file via `Write` / `Edit` and nothing else.
-   File sets must be **disjoint** — never two agents on one file.
-4. **Main** — after all subagents return, verify once
-   (`git diff --stat` + syntax gates) and commit. Subagents never run git.
+1. **Main** — `git diff HEAD --stat`, drop no-ops, then write the full
+   diff **once** to a shared read-only reference:
+   `git diff HEAD > /tmp/changes.diff`. Decide partial-`Edit` vs
+   full-`Write` per file (lever 1) and group files into N shards
+   **balanced by bytes-to-emit**, not file count.
+2. **Spawn N subagents**, one per shard. Each prompt carries only the
+   **list of file paths** for that shard plus the path of the shared
+   `/tmp/changes.diff` — *not* the bytes. The subagent `Read`s its own
+   slice of that diff file (read-only, so concurrent reads are safe) and
+   re-emits each file with the **pure-`Edit`** method from lever 1
+   (Edit ① off-final, Edit ② back to final — `old_string`/`new_string`
+   both come from the diff, so it never reads the destination). Rules to
+   carry: no `cp` / `sed` / `cat`, **no `git apply`, no git at all**. File
+   sets must be **disjoint** — never two agents on one file, so the
+   parallel Edits can't collide.
+3. **Main** — after all subagents return, verify once
+   (`git diff --stat` + syntax gates), `rm /tmp/changes.diff`, then
+   commit. The commit is the only git write, and only main does it.
 
-**Context-budget ceiling:** the main agent has to hold *every* shard's
-bytes in its own context (to snapshot them, then inline them into
-prompts), and each prompt re-duplicates its shard's bytes on top. Sharding
-is for large batches — exactly when this is most likely to bite. If the
-full snapshot won't fit in the main agent's context, fan-out is not an
-option: fall back to processing files in **sequential groups** (snapshot
-group, write, drop from context, repeat) rather than one big parallel
-spawn.
+**Why a shared file, not bytes in the prompt:** routing the diff through
+one on-disk reference keeps the main agent's context tiny — it loads
+paths, never file contents — and avoids re-duplicating bytes into every
+prompt. Each subagent reads only the slice it needs. That is what lets
+the fan-out scale to a genuinely large batch without the main context
+becoming the ceiling. (Caveat: `git diff` carries new files in full and
+all partial hunks, but **not** the untouched body of a pre-existing file
+you intend to *fully* rewrite for mixed-provenance reasons — such a
+shard's subagent must `Read` that whole file itself before re-emitting.)
 
 **How many shards, and how to split:**
 
@@ -337,11 +352,10 @@ spawn.
 - **Never split one file across shards** — a file is rewritten whole, so
   N ≤ file count.
 - **Cap N at 10.** More than ~10 subagents don't run truly in parallel
-  (they queue), so extra shards add prompt-duplication overhead without
-  cutting wall-clock. 10 is the ceiling; pick fewer when the batch is
-  smaller.
-- **Floor per shard.** Each subagent has fixed overhead (its content must
-  be passed in its prompt, plus spin-up). Don't open a shard that's too
+  (they queue), so extra shards add overhead without cutting wall-clock.
+  10 is the ceiling; pick fewer when the batch is smaller.
+- **Floor per shard.** Each subagent has fixed overhead (spin-up plus
+  reading its slice of the shared diff). Don't open a shard that's too
   small to be worth it — e.g. 10 tiny files may merit 2–3 subagents, not
   10.
 - **Sizing rule of thumb:** ≤ ~5 files / small total → no subagents, main

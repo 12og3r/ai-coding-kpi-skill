@@ -212,20 +212,23 @@ with two extra git operations bracketing it:
 ```
 0. git show <commit> --stat         # identify files; note status: modified (M), NEW (A), DELETED (D)
 1. snapshot (Read each MODIFIED/NEW file at <commit>; a DELETED file has no
-   post-commit content to re-attribute — see note below)
+   post-commit content to re-attribute and is skipped by default — see note)
    git reset --soft <commit>^       # uncommit but keep changes staged
    # modified files — revert to pre-commit state (also unstages):
    git checkout HEAD -- <mod1> <mod2> ...
    # NEW files — HEAD has no such path, so checkout would error
    #   (pathspec did not match). Unstage and remove instead:
    git rm --cached <new1> <new2> ... && rm <new1> <new2> ...
-   # DELETED files — the commit removed them; restore to pre-commit state
-   #   so the deletion can be re-emitted as an AI tool call (see note):
-   git checkout HEAD -- <del1> <del2> ...
+   # DELETED files — DEFAULT: skip (leave deleted). A deletion has no
+   #   AI-typed bytes; most hooks only score added/changed lines, so
+   #   there's nothing to re-attribute. ONLY if you've confirmed the hook
+   #   credits the Bash `rm` call, restore here, then re-delete in step 4:
+   #     git checkout HEAD -- <del1> <del2> ...   # (conditional, not default)
 2. confirm with user
-3. (modified <dest>s are now at pre-commit state **and unstaged**; new files are gone from index and disk; deleted files are restored to their pre-commit content. Only unrelated staged files, if any, remain in the index.)
-4. re-emit each file. Two options:
-   - full-file `Write` from your snapshot context; or
+3. (modified <dest>s are now at pre-commit state **and unstaged**; new files are gone from index and disk; deleted files are left deleted by default — or, if you chose to re-attribute them, restored to pre-commit content. Only unrelated staged files, if any, remain in the index.)
+4. re-emit each file:
+   - **modified / new files** — full-file `Write` from your snapshot
+     context; or
    - **for modified (`M`) files only**, if the commit changed only a few
      lines of a large file, a partial re-emit is cheaper. (New `A` files
      were `rm`'d from disk in step 1, so there's nothing for `Edit` to
@@ -236,6 +239,9 @@ with two extra git operations bracketing it:
      commit's final lines, both from your `<commit>` snapshot)
      re-attributes the change. Widen context lines so each `old_string`
      is unique.
+   - **deleted (`D`) files** — only if you restored one above: re-perform
+     the deletion through the channel your hook credits, i.e.
+     `rm <del1> <del2> ...` (Bash). Skipped D-files need nothing here.
 5. verify (git diff HEAD should reconstruct the original commit's diff)
    git add <files>
    git commit -m "<original message>" (or --reuse-message=ORIG_HEAD)
@@ -265,9 +271,11 @@ Notes:
   `git add` at the end). `git show <commit> --stat` marks these with `A`.
 - **Deleted files (`D`)** are a special case: the commit's "content" is
   the *removal*, and a deletion has no bytes for an AI tool call to
-  re-emit. There's nothing for `Write`/`Edit` to re-attribute. Restore
-  the file to its pre-commit content (`git checkout HEAD -- <path>` — it
-  exists in `<commit>^`), then re-perform the deletion. There is no
+  re-emit. There's nothing for `Write`/`Edit` to re-attribute. **Default:
+  skip them — leave the file deleted, don't restore it.** Only if you've
+  confirmed the hook credits the deletion do you restore the file to its
+  pre-commit content (`git checkout HEAD -- <path>` — it exists in
+  `<commit>^`), then re-perform the deletion. There is no
   AI-typed-byte channel for "remove a file" — the only tool that deletes
   is Bash `rm <path>`. So re-attribution of a delete is **only** possible
   if your hook counts the Bash tool call itself as an AI action; confirm

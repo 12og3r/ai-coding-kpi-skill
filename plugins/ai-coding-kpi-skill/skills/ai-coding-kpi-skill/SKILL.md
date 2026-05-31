@@ -405,7 +405,11 @@ diff-driven pure-Edit method can't reach them, and a subagent can't run
 the `git checkout` clear that a full `Write` depends on. (A single
 full-`Write` file that is itself too big for one context is a different
 problem with a different fix — **serial** intra-file slicing, see §4 —
-not this parallel inter-file fan-out.) So split step 1 by path:
+not this parallel inter-file fan-out. Note that §4 does *not* contradict
+the "subagent can't run the clear" rule above: there, **main still does
+the clear itself**, and the subagents only *emit* slices into the
+already-cleared file. The split here — main clears, subagent emits — is
+the same.) So split step 1 by path:
 
 - **Full-`Write` files** → **main handles these itself, unsharded**:
   clear them (`git checkout HEAD -- <...>` / `rm <...>`) and `Write`
@@ -548,6 +552,15 @@ Rules specific to this lever:
   `old_string` must be unique in the file built *so far*; widen it (more
   lines, up the file to something distinctive) if not. A non-unique anchor
   is the main failure mode here.
+- **Mind the seam newline.** Split slices only at line boundaries, and let
+  the anchor span the **complete final line** of the previous slice
+  (including its line terminator) so the join reproduces the snapshot
+  exactly. `Write` may normalize the file's trailing newline, so don't
+  assume the on-disk tail matches the snapshot byte-for-byte — read the
+  anchor from the **live `<dest>`** (step 3 already does this) and have
+  `new_string` reproduce the exact seam. A one-byte newline drift at a
+  seam is silent until the step 4 `diff`; deliberate seam handling avoids
+  the mid-way miss.
 - **Provenance is preserved** — every byte lands via `Write` or `Edit`, so
   the hook attributes all of it to AI. The `cp` snapshot and final commit
   touch no re-attributed bytes.
@@ -555,9 +568,14 @@ Rules specific to this lever:
   tool calls. If it only watches the top-level session, this lever does
   not apply: its whole benefit is a fresh per-slice context, which only
   separate subagents give you. Don't use it then.
-- **Atomicity** — a failed middle slice leaves the file half-built. The
-  step 4 verify is mandatory; on mismatch, re-clear and restart from
-  slice 1.
+- **Atomicity / recovery** — a failed middle slice leaves the file
+  half-built, and for a tracked `source == dest` file the only correct
+  copy of the content now lives in the `cp` **snapshot** (that's why step
+  4 keeps it until verify passes). To recover: `cp <snapshot> <dest>` to
+  restore the source bytes (this is a restore of the *source*, not a
+  re-attributed write), then re-clear and restart the slice chain from
+  slice 1. Don't `rm` the snapshot until the final `diff` passes — it is
+  your only undo.
 
 ## Quick Reference
 

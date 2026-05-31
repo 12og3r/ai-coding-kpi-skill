@@ -103,9 +103,13 @@ git status --short
 git diff HEAD --stat
 ```
 
-From that stat, **first skip any file with no diff** — a no-op has
-nothing to re-attribute, so don't read or rewrite it. The files that
-remain are your destinations.
+From these two lists, **first drop any file with no pending change** — a
+no-op has nothing to re-attribute. A "change" means either a `git diff
+HEAD --stat` entry **or** a `??` (untracked) line in `git status
+--short`: an untracked file pasted/copied in (scenario 3) shows **only**
+in `git status --short`, never in `git diff HEAD --stat`, so judging by
+the stat alone would wrongly skip exactly the file you need to rewrite.
+The files that remain are your destinations.
 
 For **every** remaining destination, use the `Read` tool to load the full
 post-change content of the **source** into context. The diff alone is
@@ -129,7 +133,14 @@ authorized the destructive step in the same turn.
 
 ### 3. Clear the destination
 
-Batch this: one command for **all** tracked dests, one for all untracked.
+**Skip this step entirely for files you're handling via the partial
+re-emit path** (Performance §1): that path does its own region-level
+clear through Edit ① and must keep the rest of the file intact, so a
+full-file `git checkout` here would defeat it. Step 3 is only for files
+you'll rewrite wholesale via `Write` in step 4.
+
+For the full-rewrite files, batch this: one command for **all** tracked
+dests, one for all untracked.
 
 For tracked, modified files in the current repo:
 ```bash
@@ -195,12 +206,16 @@ rather than the working tree, the workflow is the same five steps
 with two extra git operations bracketing it:
 
 ```
-0. git show <commit> --stat         # identify files in the commit
+0. git show <commit> --stat         # identify files in the commit; note which are NEW (A) vs modified (M)
 1. snapshot (Read each file at <commit>)
    git reset --soft <commit>^       # uncommit but keep changes staged
-   git checkout HEAD -- <dest>      # revert each file to its pre-commit state
+   # modified files — revert to pre-commit state (also unstages):
+   git checkout HEAD -- <mod1> <mod2> ...
+   # NEW files — HEAD has no such path, so checkout would error
+   #   (pathspec did not match). Unstage and remove instead:
+   git rm --cached <new1> <new2> ... && rm <new1> <new2> ...
 2. confirm with user
-3. (each <dest> is now at pre-commit state **and unstaged** — `git checkout HEAD -- <dest>` rewrote both the working tree and the index entry. Only unrelated staged files, if any, remain in the index.)
+3. (modified <dest>s are now at pre-commit state **and unstaged**; new files are gone from index and disk. Only unrelated staged files, if any, remain in the index.)
 4. Write each file from your snapshot context
 5. verify (git diff HEAD should reconstruct the original commit's diff)
    git add <files>
@@ -222,6 +237,13 @@ Notes:
   If you'd rather wipe the whole index first, `git reset HEAD~1`
   (mixed, the default) unstages everything; the subsequent
   `git checkout HEAD -- <dest>` then does the identical revert.
+- **New files in the commit** need different handling from modified
+  ones. After `git reset --soft`, a file the commit *added* is staged as
+  `A <path>`, but the new HEAD (`<commit>^`) has no such path — so
+  `git checkout HEAD -- <path>` fails with *pathspec did not match*.
+  Unstage and delete it instead: `git rm --cached <path> && rm <path>`.
+  It then re-enters the normal untracked flow (rewrite via `Write`,
+  `git add` at the end). `git show <commit> --stat` marks these with `A`.
 - `ORIG_HEAD` is the SHA of the commit you just reset away — handy
   for `git commit --reuse-message=ORIG_HEAD` to preserve the original
   commit message verbatim.
@@ -380,8 +402,8 @@ a large batch. Sharding alone only buys latency, not fewer bytes.
 | Snapshot  | `git status --short` + `git diff HEAD --stat`; identify src/dst | Bash                   |
 | Load      | full content of each **source** file into context               | Read                   |
 | Confirm   | show file list, get user OK                                     | text / AskUserQuestion |
-| Clear     | `git checkout HEAD -- <dest>` / `rm <dest>`                     | Bash                   |
-| Rewrite   | type content into `Write` tool's `content` param                | Write                  |
+| Clear     | full-rewrite files only: `git checkout HEAD -- <dest...>` / `rm <dest...>` (partial path skips this) | Bash            |
+| Rewrite   | full file → `Write` content param; localized change → two `Edit`s per hunk (partial re-emit) | Write / Edit    |
 | Verify    | `git diff` + syntax gate + (optional) `diff -q src dst`         | Bash                   |
 
 ## Red Flags — You're Cheating the KPI

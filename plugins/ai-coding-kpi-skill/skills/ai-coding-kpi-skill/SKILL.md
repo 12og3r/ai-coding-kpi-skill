@@ -84,6 +84,13 @@ Scenarios this covers:
     fine here even though its whole-file size blows past 50%. Gate this
     path on **hunk** size, not file size. Only skip if the *diff itself*
     is too large.
+
+  Before skipping a full-`Write` file purely on size, check whether it
+  qualifies for **serial sliced re-emit** (Performance §4): a file too
+  big for one context can still be rewritten whole if you slice it and
+  emit the slices one-after-another, since no single context ever holds
+  the entire file. Size alone is then not a reason to skip — only a
+  genuinely unsliceable blob (one giant minified line, binary) is.
 - There are unrelated dirty changes you can't safely snapshot.
 - The hook the user is trying to satisfy specifically excludes
   pure-rewrite churn (ask if unsure — bypassing detection on a
@@ -390,12 +397,15 @@ bytes-to-emit is large and divisible (rule of thumb: ≳10 files, or one
 big batch); skip it for a handful of files, where subagent spin-up costs
 more than it saves.
 
-**Only partial-`Edit` files can be sharded this way.** A full-file
+**Only partial-`Edit` files can be sharded *this* way** — i.e. across
+subagents running **in parallel**, one whole file each. A full-file
 `Write` (mixed/uncertain provenance — lever 1's decision rule) must
 re-attribute lines that aren't in `git diff HEAD` at all, so the
 diff-driven pure-Edit method can't reach them, and a subagent can't run
-the `git checkout` clear that a full `Write` depends on. So split step 1
-by path:
+the `git checkout` clear that a full `Write` depends on. (A single
+full-`Write` file that is itself too big for one context is a different
+problem with a different fix — **serial** intra-file slicing, see §4 —
+not this parallel inter-file fan-out.) So split step 1 by path:
 
 - **Full-`Write` files** → **main handles these itself, unsharded**:
   clear them (`git checkout HEAD -- <...>` / `rm <...>`) and `Write`
@@ -472,6 +482,74 @@ real hook before relying on this.
 Combine the levers in order: **partial-hunk re-emit first** (less to type
 → helps cost *and* latency), **then** shard whatever's left if it's still
 a large batch. Sharding alone only buys latency, not fewer bytes.
+
+### 4. Oversized single file → serial sliced re-emit
+
+§3 shards *different files* across subagents in parallel. This lever
+solves the opposite problem: **one** file whose whole-file `Write` is too
+big for a single context (the *Do NOT use* size gate). Instead of
+skipping it, slice that one file and emit the slices **serially**, so no
+single context ever holds the whole file.
+
+This is **not** a speed lever — it's strictly slower than one `Write`
+would be (serial, plus per-slice overhead). Use it only when the file
+genuinely doesn't fit and a full rewrite is required (e.g. mixed
+provenance, lever 1's full-`Write` case). If a *partial* re-emit applies
+(small localized edit in a big file), prefer that — it already sidesteps
+the size gate without slicing.
+
+**Why slices can't all be `Write`:** `Write` replaces the *entire* file,
+so a second `Write` erases the first slice. Only the **first** slice is a
+`Write` (it creates the file); every later slice is an `Edit` that
+**appends** after the previous slice. Each `Edit`'s `old_string` must
+match the current on-disk tail, so slice K depends on slice K−1 — that
+dependency is exactly why it must be **serial**, not parallel.
+
+```
+0. Main: this is a single dest, so confirm the destructive clear (step 2)
+   applies. Snapshot the source so slices can be read after the dest is
+   cleared:
+   - source == dest (the usual case): cp the file to a scratch path first
+     (cp is fine — it only preserves the SOURCE; it does not produce the
+     re-attributed destination bytes). Clear the dest (step 3).
+   - source != dest: leave the source in place; no copy needed.
+   wc -l <source-snapshot>      # total lines, to assign ranges — main
+                                #   never loads the content itself
+1. Main: pick slice boundaries on LINE boundaries, preferably at a
+   unique-looking line (not a bare `}` or blank line), so the anchor in
+   step 3 stays unique. Record [start,end] line ranges, in order.
+2. Main → subagent 1 (serial): "Read(<snapshot>, offset=start1, limit=len1),
+   then Write(<dest>, <those exact bytes>)." Subagent loads only slice 1.
+3. Main → subagent K (K≥2, one at a time, in order): "Read(<snapshot>,
+   offset=startK, limit=lenK). Read the last few lines already in <dest>
+   for your anchor. Then Edit(<dest>, old_string=<that on-disk tail>,
+   new_string=<same tail> + <slice K>)." The append leaves earlier slices
+   untouched. Widen the anchor until old_string matches exactly once.
+4. Main: after the last slice, verify the whole file reconstructs the
+   intended content (git diff / diff -q against the snapshot), then rm the
+   scratch snapshot and commit.
+```
+
+Rules specific to this lever:
+
+- **Serial, never parallel** — two subagents appending to the same file
+  collide. One returns before the next starts. (Contrast §3, where shards
+  are disjoint files and *do* run in parallel.)
+- **Anchor uniqueness at every seam.** The tail-of-previous-slice used as
+  `old_string` must be unique in the file built *so far*; widen it (more
+  lines, up the file to something distinctive) if not. A non-unique anchor
+  is the main failure mode here.
+- **Provenance is preserved** — every byte lands via `Write` or `Edit`, so
+  the hook attributes all of it to AI. The `cp` snapshot and final commit
+  touch no re-attributed bytes.
+- **Same subagent prerequisite as §3** — the hook must credit subagent
+  tool calls. If it only watches the top-level session, run the serial
+  chain in the main agent across turns instead (same Write-then-append
+  sequence; rely on context dropping between turns), or don't use this
+  lever.
+- **Atomicity** — a failed middle slice leaves the file half-built. The
+  step 4 verify is mandatory; on mismatch, re-clear and restart from
+  slice 1.
 
 ## Quick Reference
 

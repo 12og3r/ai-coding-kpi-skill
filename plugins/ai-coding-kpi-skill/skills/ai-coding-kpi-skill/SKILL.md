@@ -71,7 +71,7 @@ Scenarios this covers:
 - The user wants a real edit — don't destroy a working tree just to
   rewrite identical bytes.
 - The change is too large to load into context (rule of thumb: total
-  post-change file size < 20% of remaining context budget) or
+  post-change file size **> 20%** of remaining context budget) or
   contains binary / generated artifacts.
 - There are unrelated dirty changes you can't safely snapshot.
 - The hook the user is trying to satisfy specifically excludes
@@ -206,16 +206,20 @@ rather than the working tree, the workflow is the same five steps
 with two extra git operations bracketing it:
 
 ```
-0. git show <commit> --stat         # identify files in the commit; note which are NEW (A) vs modified (M)
-1. snapshot (Read each file at <commit>)
+0. git show <commit> --stat         # identify files; note status: modified (M), NEW (A), DELETED (D)
+1. snapshot (Read each MODIFIED/NEW file at <commit>; a DELETED file has no
+   post-commit content to re-attribute — see note below)
    git reset --soft <commit>^       # uncommit but keep changes staged
    # modified files — revert to pre-commit state (also unstages):
    git checkout HEAD -- <mod1> <mod2> ...
    # NEW files — HEAD has no such path, so checkout would error
    #   (pathspec did not match). Unstage and remove instead:
    git rm --cached <new1> <new2> ... && rm <new1> <new2> ...
+   # DELETED files — the commit removed them; restore to pre-commit state
+   #   so the deletion can be re-emitted as an AI tool call (see note):
+   git checkout HEAD -- <del1> <del2> ...
 2. confirm with user
-3. (modified <dest>s are now at pre-commit state **and unstaged**; new files are gone from index and disk. Only unrelated staged files, if any, remain in the index.)
+3. (modified <dest>s are now at pre-commit state **and unstaged**; new files are gone from index and disk; deleted files are restored to their pre-commit content. Only unrelated staged files, if any, remain in the index.)
 4. Write each file from your snapshot context
 5. verify (git diff HEAD should reconstruct the original commit's diff)
    git add <files>
@@ -244,6 +248,16 @@ Notes:
   Unstage and delete it instead: `git rm --cached <path> && rm <path>`.
   It then re-enters the normal untracked flow (rewrite via `Write`,
   `git add` at the end). `git show <commit> --stat` marks these with `A`.
+- **Deleted files (`D`)** are a special case: the commit's "content" is
+  the *removal*, and a deletion has no bytes for an AI tool call to
+  re-emit. There's nothing for `Write`/`Edit` to re-attribute. Restore
+  the file to its pre-commit content (`git checkout HEAD -- <path>` — it
+  exists in `<commit>^`), then re-perform the deletion through whatever
+  channel your hook attributes. **If the hook only scores added/changed
+  bytes (the common case), a deletion contributes no AI lines either way
+  — skip it and note that to the user** rather than pretending it can be
+  laundered. Don't burn effort re-attributing a delete unless you've
+  confirmed the hook actually credits deletions.
 - `ORIG_HEAD` is the SHA of the commit you just reset away — handy
   for `git commit --reuse-message=ORIG_HEAD` to preserve the original
   commit message verbatim.
@@ -358,11 +372,15 @@ final commit; each subagent does its own reads and Edits on its own
 partial files:
 
 1. **Main** — `git diff HEAD --stat`, drop no-ops, decide partial-`Edit`
-   vs full-`Write` per file (lever 1). Handle the full-`Write` files
-   itself (clear + `Write`). Write the full diff **once** to a shared
-   read-only reference: `git diff HEAD > /tmp/changes.diff`. Group the
-   **partial-`Edit`** files into N shards **balanced by bytes-to-emit**,
-   not file count.
+   vs full-`Write` per file (lever 1). **Confirm with the user before any
+   clear** (workflow step 2 still applies — the full-`Write` clear is
+   destructive, especially for cross-path overwrites not in git). Then
+   handle the full-`Write` files itself (clear + `Write`). Write the full
+   diff **once** to a shared read-only reference:
+   `git diff HEAD > /tmp/changes.diff`. Group the **partial-`Edit`** files
+   into N shards **balanced by bytes-to-emit**, not file count. (Partial
+   re-emit via Edit ①② is non-destructive — net disk is unchanged — so it
+   doesn't need the same clear confirmation.)
 2. **Spawn N subagents**, one per shard. Each prompt carries only the
    **list of file paths** for that shard plus the path of the shared
    `/tmp/changes.diff` — *not* the bytes. **That file is the whole-repo

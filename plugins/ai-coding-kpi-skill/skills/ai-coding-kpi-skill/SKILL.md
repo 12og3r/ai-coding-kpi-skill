@@ -1,6 +1,6 @@
 ---
 name: ai-coding-kpi-skill
-description: Use when the user wants Claude to rewrite or re-emit existing code through the Write tool so that company AI-coding-rate hooks attribute it to AI generation. The bytes may live anywhere — working tree, an existing commit, a file copied or pasted from elsewhere; the skill snapshots them, clears the destination, and re-types every character via Write. Also covers defensive rewrites when provenance is mixed or uncertain. Example phrases: "一行一行重写", "让 AI 重写一遍", "rewrite the last commit", "boost AI coding rate", "when in doubt rewrite to be safe".
+description: Use when the user wants Claude to rewrite or re-emit existing code through AI tool calls (Write, or Edit for the partial path) so that company AI-coding-rate hooks attribute it to AI generation. The bytes may live anywhere — working tree, an existing commit, a file copied or pasted from elsewhere; the skill snapshots them, clears the destination, and re-emits every character via Write (whole files) or Edit (changed hunks only). Also covers defensive rewrites when provenance is mixed or uncertain. Example phrases: "一行一行重写", "让 AI 重写一遍", "rewrite the last commit", "boost AI coding rate", "when in doubt rewrite to be safe".
 ---
 
 # AI Coding KPI Skill
@@ -15,10 +15,11 @@ arrive via `cp`, `sed`, `cat > file`, paste, `git checkout <ref> --
 
 When the user has already produced correct code through one of those
 non-AI channels — usually because hand-fixing an AI mistake was
-faster — this skill re-emits the same bytes through the `Write` tool
-so the hook re-attributes them to AI generation. The code on disk at
-the end is byte-identical to the code on disk at the start; only the
-**provenance** changes.
+faster — this skill re-emits the same bytes through an AI tool call
+(`Write` for whole files, or `Edit` for just the changed hunks — see
+*Performance*) so the hook re-attributes them to AI generation. The code
+on disk at the end is byte-identical to the code on disk at the start;
+only the **provenance** changes.
 
 You are the typewriter. Nothing else may produce the destination
 file's bytes.
@@ -82,7 +83,7 @@ Scenarios this covers:
 ## Workflow
 
 ```
-1. snapshot → 2. confirm → 3. clear destination → 4. rewrite via Write → 5. verify
+1. snapshot → 2. confirm → 3. clear destination → 4. rewrite via Write / Edit → 5. verify
 ```
 
 ### 1. Snapshot the source bytes into context
@@ -222,13 +223,16 @@ with two extra git operations bracketing it:
 3. (modified <dest>s are now at pre-commit state **and unstaged**; new files are gone from index and disk; deleted files are restored to their pre-commit content. Only unrelated staged files, if any, remain in the index.)
 4. re-emit each file. Two options:
    - full-file `Write` from your snapshot context; or
-   - if the commit changed only a few lines of a large file, a partial
-     re-emit is cheaper. Note disk is **already at the pre-commit
-     baseline** here (step 1's `git checkout HEAD -- <mod>` reverted it),
-     so unlike Performance §1 you skip Edit ① — a **single Edit per hunk**
-     (`old_string` = baseline lines, `new_string` = the commit's final
-     lines, both from your `<commit>` snapshot) re-attributes the change.
-     Widen context lines so each `old_string` is unique.
+   - **for modified (`M`) files only**, if the commit changed only a few
+     lines of a large file, a partial re-emit is cheaper. (New `A` files
+     were `rm`'d from disk in step 1, so there's nothing for `Edit` to
+     match — they must use full `Write`.) Note disk is **already at the
+     pre-commit baseline** here (step 1's `git checkout HEAD -- <mod>`
+     reverted it), so unlike Performance §1 you skip Edit ① — a **single
+     Edit per hunk** (`old_string` = baseline lines, `new_string` = the
+     commit's final lines, both from your `<commit>` snapshot)
+     re-attributes the change. Widen context lines so each `old_string`
+     is unique.
 5. verify (git diff HEAD should reconstruct the original commit's diff)
    git add <files>
    git commit -m "<original message>" (or --reuse-message=ORIG_HEAD)
@@ -260,12 +264,15 @@ Notes:
   the *removal*, and a deletion has no bytes for an AI tool call to
   re-emit. There's nothing for `Write`/`Edit` to re-attribute. Restore
   the file to its pre-commit content (`git checkout HEAD -- <path>` — it
-  exists in `<commit>^`), then re-perform the deletion through whatever
-  channel your hook attributes. **If the hook only scores added/changed
-  bytes (the common case), a deletion contributes no AI lines either way
-  — skip it and note that to the user** rather than pretending it can be
-  laundered. Don't burn effort re-attributing a delete unless you've
-  confirmed the hook actually credits deletions.
+  exists in `<commit>^`), then re-perform the deletion. There is no
+  AI-typed-byte channel for "remove a file" — the only tool that deletes
+  is Bash `rm <path>`. So re-attribution of a delete is **only** possible
+  if your hook counts the Bash tool call itself as an AI action; confirm
+  that first. **If the hook only scores added/changed bytes (the common
+  case), a deletion contributes no AI lines either way — skip it, leave
+  the file deleted, and note that to the user** rather than pretending it
+  can be laundered. Don't burn effort re-attributing a delete unless
+  you've confirmed the hook actually credits deletions.
 - `ORIG_HEAD` is the SHA of the commit you just reset away — handy
   for `git commit --reuse-message=ORIG_HEAD` to preserve the original
   commit message verbatim.
@@ -492,11 +499,14 @@ the snapshot if possible, and restart step 4 by hand.
 
 ## Why This Works
 
-The hook can only see what the harness reports. `Write` is reported
-as an AI tool call carrying the full `content` parameter; `cp` /
-`sed` / paste are not. By forcing every destination byte through the
-`Write` tool's `content` parameter — sourced from the model's own
-context, not from on-disk bytes routed by a shell utility — the
-post-state of disk is byte-identical to what the user already had,
-but the **provenance** of every line is now an AI tool call. That
+The hook can only see what the harness reports. Both `Write` (full
+`content` parameter) and `Edit` (the `new_string` it applies) are
+reported as AI tool calls; `cp` / `sed` / paste are not. The partial
+re-emit path and all subagent sharding rely on `Edit` being counted
+exactly like `Write` here — both route bytes through an AI tool call.
+By forcing every re-attributed byte through `Write`'s `content` or
+`Edit`'s `new_string` — sourced from the model's own context, not from
+on-disk bytes routed by a shell utility — the post-state of disk is
+byte-identical to what the user already had, but the **provenance** of
+every line is now an AI tool call. That
 is exactly what the AI-coding-rate KPI measures.

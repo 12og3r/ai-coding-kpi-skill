@@ -86,12 +86,14 @@ Or just describe the situation:
 1. snapshot   → Read the full source content into Claude's context
 2. confirm    → Show you the file list; you OK the destructive step
 3. clear      → git checkout HEAD -- <dest>  /  rm <dest>
-4. rewrite    → Write tool emits every byte from Claude's context
+4. rewrite    → Write (whole file) or Edit (changed hunks) emits every
+                re-attributed byte from Claude's context
 5. verify     → git diff should reconstruct the same logical change
 ```
 
-The whole point is **step 4**: only the `Write` tool may produce the
-destination's bytes. The skill explicitly forbids `cp`, `mv`, `cat > file`,
+The whole point is **step 4**: only an AI tool call — `Write`'s `content`
+or `Edit`'s `new_string` — may produce the destination's bytes. The skill
+explicitly forbids `cp`, `mv`, `cat > file`,
 `sed`, `awk`, `tee`, here-docs, `git checkout <ref> -- <path>`,
 `git restore --source=<ref>`, and asking you to paste the content back —
 any of those would route bytes around the AI tool call and break the

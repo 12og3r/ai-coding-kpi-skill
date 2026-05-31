@@ -1,6 +1,6 @@
 ---
 name: ai-coding-kpi-skill
-description: Use when the user wants Claude to rewrite or re-emit existing code through the Write tool so that company AI-coding-rate hooks attribute it to AI generation. The bytes may live anywhere — working tree, an existing commit, a file copied or pasted from elsewhere; the skill snapshots them, clears the destination, and re-types every character via Write. Also covers defensive rewrites when provenance is mixed or uncertain. Example phrases: "一行一行重写", "让 AI 重写一遍", "rewrite the last commit", "boost AI coding rate", "when in doubt rewrite to be safe".
+description: Use when the user wants Claude to rewrite or re-emit existing code through AI tool calls (Write, or Edit for the partial path) so that company AI-coding-rate hooks attribute it to AI generation. The bytes may live anywhere — working tree, an existing commit, a file copied or pasted from elsewhere; the skill snapshots them, clears the destination, and re-emits every character via Write (whole files) or Edit (changed hunks only). Also covers defensive rewrites when provenance is mixed or uncertain. Example phrases: "一行一行重写", "让 AI 重写一遍", "rewrite the last commit", "boost AI coding rate", "when in doubt rewrite to be safe".
 ---
 
 # AI Coding KPI Skill
@@ -15,10 +15,11 @@ arrive via `cp`, `sed`, `cat > file`, paste, `git checkout <ref> --
 
 When the user has already produced correct code through one of those
 non-AI channels — usually because hand-fixing an AI mistake was
-faster — this skill re-emits the same bytes through the `Write` tool
-so the hook re-attributes them to AI generation. The code on disk at
-the end is byte-identical to the code on disk at the start; only the
-**provenance** changes.
+faster — this skill re-emits the same bytes through an AI tool call
+(`Write` for whole files, or `Edit` for just the changed hunks — see
+*Performance*) so the hook re-attributes them to AI generation. The code
+on disk at the end is byte-identical to the code on disk at the start;
+only the **provenance** changes.
 
 You are the typewriter. Nothing else may produce the destination
 file's bytes.
@@ -26,7 +27,8 @@ file's bytes.
 ## When to Use
 
 Fires whenever the user asks for **the same bytes to come back through
-the Write tool**, in any of these shapes:
+an AI tool call** (`Write`, or `Edit` for the partial path), in any of
+these shapes:
 
 - "rewrite this line by line" / "让 AI 重新写一遍"
 - "rewrite the last commit" / "把最后一个提交一行一行重写"
@@ -35,15 +37,15 @@ the Write tool**, in any of these shapes:
 - "when in doubt, rewrite to be safe" / "保险起见让 AI 重写"
 
 Don't anchor on the exact wording — match on the **intent**: user
-wants existing code to be re-emitted through Write so a downstream
-hook sees AI provenance.
+wants existing code to be re-emitted through an AI tool call (`Write` or
+`Edit`) so a downstream hook sees AI provenance.
 
 Scenarios this covers:
 
 1. **Uncommitted hand edits** — user fixed an AI mistake by typing;
    the working tree has correct content, but the hook saw human edits.
 2. **Pasted / external snippet** — user pasted from chat / docs /
-   StackOverflow; the bytes never went through a `Write` call.
+   StackOverflow; the bytes never went through a `Write` or `Edit` call.
 3. **Cross-path copy** — user ran `cp ~/elsewhere/foo.kt ./foo.kt`
    (or dragged in Finder); the destination has correct content but no
    AI provenance.
@@ -54,7 +56,8 @@ Scenarios this covers:
 6. **Mixed / uncertain provenance (defensive use)** — user has been
    alternating AI completions and manual tweaks and can no longer tell
    which lines the hook will flag as human. Rewriting the whole file
-   guarantees the post-state is 100% Write-tool-attributed, removing
+   (full `Write`, since the human bytes can't be localized) guarantees
+   the post-state is 100% AI-tool-attributed, removing
    the ambiguity. Use this when the cost of a wrong KPI hit outweighs
    the cost of a redundant rewrite.
 7. **Already-committed change** — the bytes are not in the working
@@ -71,7 +74,7 @@ Scenarios this covers:
 - The user wants a real edit — don't destroy a working tree just to
   rewrite identical bytes.
 - The change is too large to load into context (rule of thumb: total
-  post-change file size < 20% of remaining context budget) or
+  post-change file size **> 20%** of remaining context budget) or
   contains binary / generated artifacts.
 - There are unrelated dirty changes you can't safely snapshot.
 - The hook the user is trying to satisfy specifically excludes
@@ -82,7 +85,7 @@ Scenarios this covers:
 ## Workflow
 
 ```
-1. snapshot → 2. confirm → 3. clear destination → 4. rewrite via Write → 5. verify
+1. snapshot → 2. confirm → 3. clear destination → 4. rewrite via Write / Edit → 5. verify
 ```
 
 ### 1. Snapshot the source bytes into context
@@ -103,7 +106,15 @@ git status --short
 git diff HEAD --stat
 ```
 
-For **every** destination path, use the `Read` tool to load the full
+From these two lists, **first drop any file with no pending change** — a
+no-op has nothing to re-attribute. A "change" means either a `git diff
+HEAD --stat` entry **or** a `??` (untracked) line in `git status
+--short`: an untracked file pasted/copied in (scenario 3) shows **only**
+in `git status --short`, never in `git diff HEAD --stat`, so judging by
+the stat alone would wrongly skip exactly the file you need to rewrite.
+The files that remain are your destinations.
+
+For **every** remaining destination, use the `Read` tool to load the full
 post-change content of the **source** into context. The diff alone is
 not enough — you need every line, because step 3 will remove the
 destination's current bytes from disk. Issue all of these `Read` calls
@@ -112,9 +123,6 @@ in a **single turn** (parallel tool calls), not one file per turn.
 (Exception: the **partial re-emit** path in the *Performance* section
 loads only the diff hunks, not the whole file — use it for large files
 with a small, localized hand-edit.)
-
-First run `git diff HEAD --stat` and **skip any file with no diff** — a
-no-op has nothing to re-attribute, so don't read or rewrite it.
 
 Track one task per destination file (`TaskCreate`) so step 4 cannot
 silently miss one.
@@ -128,7 +136,14 @@ authorized the destructive step in the same turn.
 
 ### 3. Clear the destination
 
-Batch this: one command for **all** tracked dests, one for all untracked.
+**Skip this step entirely for files you're handling via the partial
+re-emit path** (Performance §1): that path does its own region-level
+clear through Edit ① and must keep the rest of the file intact, so a
+full-file `git checkout` here would defeat it. Step 3 is only for files
+you'll rewrite wholesale via `Write` in step 4.
+
+For the full-rewrite files, batch this: one command for **all** tracked
+dests, one for all untracked.
 
 For tracked, modified files in the current repo:
 ```bash
@@ -148,14 +163,15 @@ rm <dest>     # or move aside to a backup path if user wants safety
 After this, the destination either does not exist or matches HEAD.
 The hook should now see "no AI-generated content here yet."
 
-### 4. Rewrite each destination via the Write tool
+### 4. Rewrite each destination via the Write or Edit tool
 
-For every destination, call `Write` with the path and the full
-content **typed into the `content` parameter**. The content comes
-from your conversation context — the snapshot loaded in step 1. Emit
-several `Write` calls in the **same turn** when you have multiple
-files. For large files with a small hand-edit, prefer the **partial
-re-emit** path (see *Performance*) instead of re-typing the whole file.
+The default is `Write`: call it with the path and the full content
+**typed into the `content` parameter**, sourced from your conversation
+context (the snapshot from step 1). Emit several `Write` calls in the
+**same turn** when you have multiple files. For large files with a small,
+localized hand-edit, prefer the **partial re-emit** path (Performance
+§1 — two `Edit`s per hunk) instead of re-typing the whole file; both
+`Write`'s `content` and `Edit`'s `new_string` count as AI tool calls.
 
 **Forbidden during this step:**
 - `cp`, `mv`, `cat > file`, `sed`, `awk`, `tee`, here-docs, or any
@@ -194,13 +210,32 @@ rather than the working tree, the workflow is the same five steps
 with two extra git operations bracketing it:
 
 ```
-0. git show <commit> --stat         # identify files in the commit
-1. snapshot (Read each file at <commit>)
+0. git show <commit> --stat         # identify files; note status: modified (M), NEW (A), DELETED (D)
+1. snapshot (Read each MODIFIED/NEW file at <commit>; a DELETED file has no
+   post-commit content to re-attribute — see note below)
    git reset --soft <commit>^       # uncommit but keep changes staged
-   git checkout HEAD -- <dest>      # revert each file to its pre-commit state
+   # modified files — revert to pre-commit state (also unstages):
+   git checkout HEAD -- <mod1> <mod2> ...
+   # NEW files — HEAD has no such path, so checkout would error
+   #   (pathspec did not match). Unstage and remove instead:
+   git rm --cached <new1> <new2> ... && rm <new1> <new2> ...
+   # DELETED files — the commit removed them; restore to pre-commit state
+   #   so the deletion can be re-emitted as an AI tool call (see note):
+   git checkout HEAD -- <del1> <del2> ...
 2. confirm with user
-3. (each <dest> is now at pre-commit state **and unstaged** — `git checkout HEAD -- <dest>` rewrote both the working tree and the index entry. Only unrelated staged files, if any, remain in the index.)
-4. Write each file from your snapshot context
+3. (modified <dest>s are now at pre-commit state **and unstaged**; new files are gone from index and disk; deleted files are restored to their pre-commit content. Only unrelated staged files, if any, remain in the index.)
+4. re-emit each file. Two options:
+   - full-file `Write` from your snapshot context; or
+   - **for modified (`M`) files only**, if the commit changed only a few
+     lines of a large file, a partial re-emit is cheaper. (New `A` files
+     were `rm`'d from disk in step 1, so there's nothing for `Edit` to
+     match — they must use full `Write`.) Note disk is **already at the
+     pre-commit baseline** here (step 1's `git checkout HEAD -- <mod>`
+     reverted it), so unlike Performance §1 you skip Edit ① — a **single
+     Edit per hunk** (`old_string` = baseline lines, `new_string` = the
+     commit's final lines, both from your `<commit>` snapshot)
+     re-attributes the change. Widen context lines so each `old_string`
+     is unique.
 5. verify (git diff HEAD should reconstruct the original commit's diff)
    git add <files>
    git commit -m "<original message>" (or --reuse-message=ORIG_HEAD)
@@ -221,6 +256,26 @@ Notes:
   If you'd rather wipe the whole index first, `git reset HEAD~1`
   (mixed, the default) unstages everything; the subsequent
   `git checkout HEAD -- <dest>` then does the identical revert.
+- **New files in the commit** need different handling from modified
+  ones. After `git reset --soft`, a file the commit *added* is staged as
+  `A <path>`, but the new HEAD (`<commit>^`) has no such path — so
+  `git checkout HEAD -- <path>` fails with *pathspec did not match*.
+  Unstage and delete it instead: `git rm --cached <path> && rm <path>`.
+  It then re-enters the normal untracked flow (rewrite via `Write`,
+  `git add` at the end). `git show <commit> --stat` marks these with `A`.
+- **Deleted files (`D`)** are a special case: the commit's "content" is
+  the *removal*, and a deletion has no bytes for an AI tool call to
+  re-emit. There's nothing for `Write`/`Edit` to re-attribute. Restore
+  the file to its pre-commit content (`git checkout HEAD -- <path>` — it
+  exists in `<commit>^`), then re-perform the deletion. There is no
+  AI-typed-byte channel for "remove a file" — the only tool that deletes
+  is Bash `rm <path>`. So re-attribution of a delete is **only** possible
+  if your hook counts the Bash tool call itself as an AI action; confirm
+  that first. **If the hook only scores added/changed bytes (the common
+  case), a deletion contributes no AI lines either way — skip it, leave
+  the file deleted, and note that to the user** rather than pretending it
+  can be laundered. Don't burn effort re-attributing a delete unless
+  you've confirmed the hook actually credits deletions.
 - `ORIG_HEAD` is the SHA of the commit you just reset away — handy
   for `git commit --reuse-message=ORIG_HEAD` to preserve the original
   commit message verbatim.
@@ -246,16 +301,39 @@ provenance** defensive case (scenario 6), where you can't localize the
 human bytes. For the localized scenarios (1, 3, 4, 7 — a clean, known
 hand-edit or copied region) re-emit just the changed hunks:
 
-1. Load only the diff hunks into context (`git diff HEAD -- <file>`),
-   both the `-` (HEAD) and `+` (final) sides — not the whole file.
-2. Restore the HEAD baseline for **that region only** instead of
-   clearing the whole file — i.e. reverse-apply the single hunk. This is
-   the partial analog of step 3's `git checkout HEAD -- <dest>`: it
-   produces *baseline* bytes, not final ones, so it's a clear, not a
-   cheat. The rest of the file is untouched.
-3. Re-type only that region with `Edit`: `old_string` = the HEAD lines,
-   `new_string` = the final lines, **both from context** (no destination
-   re-read). The hook attributes the `+` lines to this AI call.
+1. Record the diff to a scratch file as a **read-only reference** and
+   `Read` it: `git diff HEAD -- <file> > /tmp/changes.diff`. You need
+   both the `-` (HEAD) and `+` (final) side of every hunk. The file is
+   reference only — **never `git apply` it in either direction**;
+   applying it routes bytes onto disk through git, outside any AI tool
+   call, so the hook won't attribute them. Keep it under `/tmp` (not the
+   working tree) and `rm` it when done.
+2. For each hunk, make **two `Edit` calls with your own tool — no git**:
+   - **Edit ① (clear):** `old_string` = the final lines (what's on disk
+     now), `new_string` = the HEAD lines. This reverts the region to
+     baseline using Edit itself.
+   - **Edit ② (re-attribute):** `old_string` = the HEAD lines,
+     `new_string` = the final lines. The hook attributes these `+` lines
+     to this AI call.
+   Net disk is unchanged; Edit ①'s bytes equal HEAD, so they fall
+   outside the final diff and are ignored.
+3. `rm /tmp/changes.diff` when the file is done.
+
+Why two Edits: disk already holds the final bytes and `Edit` rejects
+`old_string == new_string`, so you can't re-emit a line onto itself. You
+must first move the region off-final (Edit ①) then back (Edit ②). Two
+Edits per hunk is the minimum for a pure-tool re-emit — **never
+substitute `git apply` for either direction**; that's the lazy shortcut
+that loses attribution.
+
+**Uniqueness:** `Edit` requires `old_string` to match exactly once in the
+file. A hunk's lines are often common (a lone `}`, a blank line, a
+repeated variable name), so a bare match can be ambiguous and the Edit
+will fail — leaving the file half-converted (some hunks reverted, others
+not). For **both** Edit ① and Edit ②, include enough surrounding context
+lines (the diff already shows them) to make `old_string` unique; widen
+the window until it matches exactly once. Process a file's hunks in a
+consistent order and verify each Edit succeeded before the next.
 
 Output now scales with the size of the human delta, not the file.
 
@@ -267,7 +345,9 @@ Delta is a small, clearly-isolated fraction → partial hunk re-emit.
 
 Don't serialize what fits in one turn:
 
-- **Filter first** — `git diff HEAD --stat` once; skip no-op files
+- **Filter first** — one `git diff HEAD --stat` **plus** `git status
+  --short`; a file is a no-op only if it appears in neither (an untracked
+  `??` file shows only in `git status --short`, per step 1). Skip no-ops
   entirely.
 - **Snapshot** — all `Read` calls in one turn (parallel tool calls).
 - **Clear** — one `git checkout HEAD -- <dest...>` for all tracked
@@ -288,45 +368,77 @@ stream. For a typing-bound rewrite that generation **is** the bottleneck.
 
 Separate subagents are separate inference streams, so sharding the files
 across them parallelizes the generation itself — a real wall-clock win.
-It does **not** lower total cost: each file's content is duplicated into a
-subagent prompt, so tokens go up. You're trading tokens for latency.
-Worth it when the total bytes-to-emit is large and divisible (rule of
-thumb: ≳10 files, or one big batch); skip it for a handful of files,
-where subagent spin-up costs more than it saves.
+It does **not** lower total cost (more agents, more fixed overhead);
+you're trading some extra work for latency. Worth it when the total
+bytes-to-emit is large and divisible (rule of thumb: ≳10 files, or one
+big batch); skip it for a handful of files, where subagent spin-up costs
+more than it saves.
 
-The main agent stays the single owner of git and the working tree:
+**Only partial-`Edit` files can be sharded this way.** A full-file
+`Write` (mixed/uncertain provenance — lever 1's decision rule) must
+re-attribute lines that aren't in `git diff HEAD` at all, so the
+diff-driven pure-Edit method can't reach them, and a subagent can't run
+the `git checkout` clear that a full `Write` depends on. So split step 1
+by path:
 
-1. **Main** — snapshot (`git diff HEAD --stat`), drop no-ops, decide
-   partial-hunk vs full-`Write` per file (see lever 1), then group files
-   into N shards **balanced by bytes-to-emit**, not file count — don't
-   pile the big files into one shard.
-2. **Main** — clear every destination first, batched:
-   `git checkout HEAD -- <...>` / `rm <...>`.
-3. **Spawn N subagents**, one per shard. Each subagent's prompt carries:
-   its files' source bytes (from the main context — AI origin, not a
-   human paste), the forbidden-operations rules (no `cp` / `sed` / `cat`,
-   no re-reading a cleared destination), and the instruction to emit each
-   file via `Write` / `Edit` and nothing else. File sets must be
-   **disjoint** — never two agents on one file.
-4. **Main** — after all subagents return, verify once
-   (`git diff --stat` + syntax gates) and commit. Subagents never run git.
+- **Full-`Write` files** → **main handles these itself, unsharded**:
+  clear them (`git checkout HEAD -- <...>` / `rm <...>`) and `Write`
+  them. They're the big/whole-file cases, usually few; keep them off the
+  subagents.
+- **Partial-`Edit` files** → these are what you shard across subagents.
+
+The main agent owns the shared diff file, the full-`Write` files, and the
+final commit; each subagent does its own reads and Edits on its own
+partial files:
+
+1. **Main** — `git diff HEAD --stat`, drop no-ops, decide partial-`Edit`
+   vs full-`Write` per file (lever 1). **Confirm with the user before any
+   clear** (workflow step 2 still applies — the full-`Write` clear is
+   destructive, especially for cross-path overwrites not in git). Then
+   handle the full-`Write` files itself (clear + `Write`). Write the full
+   diff **once** to a shared read-only reference:
+   `git diff HEAD > /tmp/changes.diff`. Group the **partial-`Edit`** files
+   into N shards **balanced by bytes-to-emit**, not file count. (Partial
+   re-emit via Edit ①② is non-destructive — net disk is unchanged — so it
+   doesn't need the same clear confirmation.)
+2. **Spawn N subagents**, one per shard. Each prompt carries only the
+   **list of file paths** for that shard plus the path of the shared
+   `/tmp/changes.diff` — *not* the bytes. **That file is the whole-repo
+   diff**, so the subagent must parse it: locate each of its files by the
+   `diff --git a/<path> b/<path>` header and take only that file's hunks
+   ("its slice" = the subagent filters the file itself; it is not
+   pre-split). Then re-emit each file with the **pure-`Edit`** method
+   from lever 1 (Edit ① off-final, Edit ② back to final —
+   `old_string`/`new_string` both come from the diff, so it never reads
+   the destination). Rules to carry: no `cp` / `sed` / `cat`, **no `git
+   apply`, no git at all**. File sets must be **disjoint** — never two
+   agents on one file, so the parallel Edits can't collide.
+3. **Main** — after all subagents return, verify once
+   (`git diff --stat` + syntax gates), `rm /tmp/changes.diff`, then
+   commit. The commit is the only git write, and only main does it.
+
+**Why a shared file, not bytes in the prompt:** routing the diff through
+one on-disk reference keeps the main agent's context tiny — it loads
+paths, never file contents — and avoids re-duplicating bytes into every
+prompt. Each subagent reads the one diff file and filters out the hunks
+for its own paths. That is what lets the fan-out scale to a genuinely
+large batch without the main context becoming the ceiling.
 
 **How many shards, and how to split:**
 
-- **Split by bytes-to-emit, not file count.** For each file count the
-  bytes you'll actually type (the diff size for a partial re-emit, the
-  whole-file size for a full `Write`).
+- **Split by bytes-to-emit, not file count.** Only partial-`Edit` files
+  are sharded (full-`Write` files stay with main), so the weight of each
+  is its **diff size** — the bytes you'll actually type via Edit ①②.
 - **Greedy big-first packing.** Sort files largest-first; repeatedly drop
   the next file into the currently-lightest shard. This keeps shard
   weights even so no subagent becomes the straggler everyone waits on.
 - **Never split one file across shards** — a file is rewritten whole, so
   N ≤ file count.
 - **Cap N at 10.** More than ~10 subagents don't run truly in parallel
-  (they queue), so extra shards add prompt-duplication overhead without
-  cutting wall-clock. 10 is the ceiling; pick fewer when the batch is
-  smaller.
-- **Floor per shard.** Each subagent has fixed overhead (its content must
-  be passed in its prompt, plus spin-up). Don't open a shard that's too
+  (they queue), so extra shards add overhead without cutting wall-clock.
+  10 is the ceiling; pick fewer when the batch is smaller.
+- **Floor per shard.** Each subagent has fixed overhead (spin-up plus
+  reading its slice of the shared diff). Don't open a shard that's too
   small to be worth it — e.g. 10 tiny files may merit 2–3 subagents, not
   10.
 - **Sizing rule of thumb:** ≤ ~5 files / small total → no subagents, main
@@ -337,8 +449,9 @@ your actual setup; extra subagents beyond the real limit just queue.)
 
 **Prerequisite — verify first:** the hook must attribute **subagent**
 tool calls to AI. If it only watches the top-level session, the bytes a
-subagent `Write`s won't count and the whole split is wasted. Confirm
-against the real hook before relying on this.
+subagent emits (here via `Edit`, since sharded files use the pure-Edit
+method) won't count and the whole split is wasted. Confirm against the
+real hook before relying on this.
 
 Combine the levers in order: **partial-hunk re-emit first** (less to type
 → helps cost *and* latency), **then** shard whatever's left if it's still
@@ -351,8 +464,8 @@ a large batch. Sharding alone only buys latency, not fewer bytes.
 | Snapshot  | `git status --short` + `git diff HEAD --stat`; identify src/dst | Bash                   |
 | Load      | full content of each **source** file into context               | Read                   |
 | Confirm   | show file list, get user OK                                     | text / AskUserQuestion |
-| Clear     | `git checkout HEAD -- <dest>` / `rm <dest>`                     | Bash                   |
-| Rewrite   | type content into `Write` tool's `content` param                | Write                  |
+| Clear     | full-rewrite files only: `git checkout HEAD -- <dest...>` / `rm <dest...>` (partial path skips this) | Bash            |
+| Rewrite   | full file → `Write` content param; localized change → two `Edit`s per hunk (partial re-emit) | Write / Edit    |
 | Verify    | `git diff` + syntax gate + (optional) `diff -q src dst`         | Bash                   |
 
 ## Red Flags — You're Cheating the KPI
@@ -380,20 +493,23 @@ the snapshot if possible, and restart step 4 by hand.
 
 | Mistake                                     | Fix                                                                                                                                                  |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Loaded only the diff, not the full file     | Always `Read` the full post-change source in step 1 — the diff omits unchanged context you need to reproduce.                                        |
+| Loaded only the diff when doing a full rewrite | For a full-file `Write`, `Read` the whole post-change source in step 1 — the diff omits unchanged context you need to reproduce. (Exception: the **partial re-emit** path in *Performance* §1 deliberately loads only the diff hunks — that is correct there, not a mistake.) |
 | Cleared destination before loading source   | Abort. If `git reflog` still has the prior tree, recover via `git checkout <reflog-sha> -- <path>`; otherwise tell the user the snapshot is lost.    |
 | Forgot untracked / new files                | `git checkout HEAD --` only handles tracked changes. `git status --short` shows `??` for untracked — handle each with `rm` + `Write`.                |
-| Cross-path source removed before Write      | If source and dest are different paths, keep the source untouched until step 5 verify. Only the **destination** gets cleared in step 3.              |
+| Cross-path source removed before Write or Edit | If source and dest are different paths, keep the source untouched until step 5 verify. Only the **destination** gets cleared in step 3.              |
 | Wrote some files, forgot one                | Cross-check the `Task` list (one task per file) against `git status` before claiming completion.                                                     |
 | Skipped step 5 verification                 | Run `git diff` after rewrites — its output should match the original logical change. If a hunk is missing or shifted, you mis-remembered a line.     |
 
 ## Why This Works
 
-The hook can only see what the harness reports. `Write` is reported
-as an AI tool call carrying the full `content` parameter; `cp` /
-`sed` / paste are not. By forcing every destination byte through the
-`Write` tool's `content` parameter — sourced from the model's own
-context, not from on-disk bytes routed by a shell utility — the
-post-state of disk is byte-identical to what the user already had,
-but the **provenance** of every line is now an AI tool call. That
+The hook can only see what the harness reports. Both `Write` (full
+`content` parameter) and `Edit` (the `new_string` it applies) are
+reported as AI tool calls; `cp` / `sed` / paste are not. The partial
+re-emit path and all subagent sharding rely on `Edit` being counted
+exactly like `Write` here — both route bytes through an AI tool call.
+By forcing every re-attributed byte through `Write`'s `content` or
+`Edit`'s `new_string` — sourced from the model's own context, not from
+on-disk bytes routed by a shell utility — the post-state of disk is
+byte-identical to what the user already had, but the **provenance** of
+every line is now an AI tool call. That
 is exactly what the AI-coding-rate KPI measures.

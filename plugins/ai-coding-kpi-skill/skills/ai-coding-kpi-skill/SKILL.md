@@ -439,8 +439,9 @@ your actual setup; extra subagents beyond the real limit just queue.)
 
 **Prerequisite — verify first:** the hook must attribute **subagent**
 tool calls to AI. If it only watches the top-level session, the bytes a
-subagent `Write`s won't count and the whole split is wasted. Confirm
-against the real hook before relying on this.
+subagent emits (here via `Edit`, since sharded files use the pure-Edit
+method) won't count and the whole split is wasted. Confirm against the
+real hook before relying on this.
 
 Combine the levers in order: **partial-hunk re-emit first** (less to type
 → helps cost *and* latency), **then** shard whatever's left if it's still

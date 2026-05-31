@@ -77,11 +77,11 @@ Scenarios this covers:
   or are binary / generated artifacts. The threshold is per-path, because
   the two paths re-emit different amounts:
   - **full `Write`** re-emits the whole file, so the gate is total
-    post-change **file** size (rule of thumb: **> 20%** of remaining
+    post-change **file** size (rule of thumb: **> 50%** of remaining
     context budget — skip);
   - **partial re-emit** (Performance §1) loads and re-emits only the
     changed **hunks**, so a 5000-line file with a 10-line hand-edit is
-    fine here even though its whole-file size blows past 20%. Gate this
+    fine here even though its whole-file size blows past 50%. Gate this
     path on **hunk** size, not file size. Only skip if the *diff itself*
     is too large.
 - There are unrelated dirty changes you can't safely snapshot.

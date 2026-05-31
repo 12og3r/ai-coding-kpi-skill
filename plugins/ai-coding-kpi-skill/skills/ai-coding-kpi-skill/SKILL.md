@@ -571,11 +571,15 @@ Rules specific to this lever:
 - **Atomicity / recovery** — a failed middle slice leaves the file
   half-built, and for a tracked `source == dest` file the only correct
   copy of the content now lives in the `cp` **snapshot** (that's why step
-  4 keeps it until verify passes). To recover: `cp <snapshot> <dest>` to
-  restore the source bytes (this is a restore of the *source*, not a
-  re-attributed write), then re-clear and restart the slice chain from
-  slice 1. Don't `rm` the snapshot until the final `diff` passes — it is
-  your only undo.
+  4 keeps it until verify passes). Two recovery options:
+  - **Retry:** re-clear `<dest>` (`git checkout HEAD -- <dest>` or
+    `rm <dest>`) and restart the slice chain from slice 1. The snapshot
+    is still intact — no cp needed.
+  - **Abandon:** `cp <snapshot> <dest>` to restore the source bytes (this
+    is a restore of the *source*, not a re-attributed write), then
+    `rm <snapshot>`. The file is back to its pre-attempt state.
+  Don't `rm` the snapshot until the final `diff` passes — it is your
+  only undo.
 
 ## Quick Reference
 

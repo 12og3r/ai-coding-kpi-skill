@@ -294,6 +294,15 @@ Edits per hunk is the minimum for a pure-tool re-emit — **never
 substitute `git apply` for either direction**; that's the lazy shortcut
 that loses attribution.
 
+**Uniqueness:** `Edit` requires `old_string` to match exactly once in the
+file. A hunk's lines are often common (a lone `}`, a blank line, a
+repeated variable name), so a bare match can be ambiguous and the Edit
+will fail — leaving the file half-converted (some hunks reverted, others
+not). For **both** Edit ① and Edit ②, include enough surrounding context
+lines (the diff already shows them) to make `old_string` unique; widen
+the window until it matches exactly once. Process a file's hunks in a
+consistent order and verify each Edit succeeded before the next.
+
 Output now scales with the size of the human delta, not the file.
 
 **Decision rule:** delta ≳ 50% of the file, or provenance is mixed /
@@ -331,24 +340,41 @@ bytes-to-emit is large and divisible (rule of thumb: ≳10 files, or one
 big batch); skip it for a handful of files, where subagent spin-up costs
 more than it saves.
 
-The main agent owns only the shared diff file and the final commit; each
-subagent does its own reads and Edits on its own files:
+**Only partial-`Edit` files can be sharded this way.** A full-file
+`Write` (mixed/uncertain provenance — lever 1's decision rule) must
+re-attribute lines that aren't in `git diff HEAD` at all, so the
+diff-driven pure-Edit method can't reach them, and a subagent can't run
+the `git checkout` clear that a full `Write` depends on. So split step 1
+by path:
 
-1. **Main** — `git diff HEAD --stat`, drop no-ops, then write the full
-   diff **once** to a shared read-only reference:
-   `git diff HEAD > /tmp/changes.diff`. Decide partial-`Edit` vs
-   full-`Write` per file (lever 1) and group files into N shards
-   **balanced by bytes-to-emit**, not file count.
+- **Full-`Write` files** → **main handles these itself, unsharded**:
+  clear them (`git checkout HEAD -- <...>` / `rm <...>`) and `Write`
+  them. They're the big/whole-file cases, usually few; keep them off the
+  subagents.
+- **Partial-`Edit` files** → these are what you shard across subagents.
+
+The main agent owns the shared diff file, the full-`Write` files, and the
+final commit; each subagent does its own reads and Edits on its own
+partial files:
+
+1. **Main** — `git diff HEAD --stat`, drop no-ops, decide partial-`Edit`
+   vs full-`Write` per file (lever 1). Handle the full-`Write` files
+   itself (clear + `Write`). Write the full diff **once** to a shared
+   read-only reference: `git diff HEAD > /tmp/changes.diff`. Group the
+   **partial-`Edit`** files into N shards **balanced by bytes-to-emit**,
+   not file count.
 2. **Spawn N subagents**, one per shard. Each prompt carries only the
    **list of file paths** for that shard plus the path of the shared
-   `/tmp/changes.diff` — *not* the bytes. The subagent `Read`s its own
-   slice of that diff file (read-only, so concurrent reads are safe) and
-   re-emits each file with the **pure-`Edit`** method from lever 1
-   (Edit ① off-final, Edit ② back to final — `old_string`/`new_string`
-   both come from the diff, so it never reads the destination). Rules to
-   carry: no `cp` / `sed` / `cat`, **no `git apply`, no git at all**. File
-   sets must be **disjoint** — never two agents on one file, so the
-   parallel Edits can't collide.
+   `/tmp/changes.diff` — *not* the bytes. **That file is the whole-repo
+   diff**, so the subagent must parse it: locate each of its files by the
+   `diff --git a/<path> b/<path>` header and take only that file's hunks
+   ("its slice" = the subagent filters the file itself; it is not
+   pre-split). Then re-emit each file with the **pure-`Edit`** method
+   from lever 1 (Edit ① off-final, Edit ② back to final —
+   `old_string`/`new_string` both come from the diff, so it never reads
+   the destination). Rules to carry: no `cp` / `sed` / `cat`, **no `git
+   apply`, no git at all**. File sets must be **disjoint** — never two
+   agents on one file, so the parallel Edits can't collide.
 3. **Main** — after all subagents return, verify once
    (`git diff --stat` + syntax gates), `rm /tmp/changes.diff`, then
    commit. The commit is the only git write, and only main does it.
@@ -356,12 +382,9 @@ subagent does its own reads and Edits on its own files:
 **Why a shared file, not bytes in the prompt:** routing the diff through
 one on-disk reference keeps the main agent's context tiny — it loads
 paths, never file contents — and avoids re-duplicating bytes into every
-prompt. Each subagent reads only the slice it needs. That is what lets
-the fan-out scale to a genuinely large batch without the main context
-becoming the ceiling. (Caveat: `git diff` carries new files in full and
-all partial hunks, but **not** the untouched body of a pre-existing file
-you intend to *fully* rewrite for mixed-provenance reasons — such a
-shard's subagent must `Read` that whole file itself before re-emitting.)
+prompt. Each subagent reads the one diff file and filters out the hunks
+for its own paths. That is what lets the fan-out scale to a genuinely
+large batch without the main context becoming the ceiling.
 
 **How many shards, and how to split:**
 

@@ -84,6 +84,13 @@ Scenarios this covers:
     fine here even though its whole-file size blows past 50%. Gate this
     path on **hunk** size, not file size. Only skip if the *diff itself*
     is too large.
+
+  Before skipping a full-`Write` file purely on size, check whether it
+  qualifies for **serial sliced re-emit** (Performance §4): a file too
+  big for one context can still be rewritten whole if you slice it and
+  emit the slices one-after-another, since no single context ever holds
+  the entire file. Size alone is then not a reason to skip — only a
+  genuinely unsliceable blob (one giant minified line, binary) is.
 - There are unrelated dirty changes you can't safely snapshot.
 - The hook the user is trying to satisfy specifically excludes
   pure-rewrite churn (ask if unsure — bypassing detection on a
@@ -390,12 +397,19 @@ bytes-to-emit is large and divisible (rule of thumb: ≳10 files, or one
 big batch); skip it for a handful of files, where subagent spin-up costs
 more than it saves.
 
-**Only partial-`Edit` files can be sharded this way.** A full-file
+**Only partial-`Edit` files can be sharded *this* way** — i.e. across
+subagents running **in parallel**, one whole file each. A full-file
 `Write` (mixed/uncertain provenance — lever 1's decision rule) must
 re-attribute lines that aren't in `git diff HEAD` at all, so the
 diff-driven pure-Edit method can't reach them, and a subagent can't run
-the `git checkout` clear that a full `Write` depends on. So split step 1
-by path:
+the `git checkout` clear that a full `Write` depends on. (A single
+full-`Write` file that is itself too big for one context is a different
+problem with a different fix — **serial** intra-file slicing, see §4 —
+not this parallel inter-file fan-out. Note that §4 does *not* contradict
+the "subagent can't run the clear" rule above: there, **main still does
+the clear itself**, and the subagents only *emit* slices into the
+already-cleared file. The split here — main clears, subagent emits — is
+the same.) So split step 1 by path:
 
 - **Full-`Write` files** → **main handles these itself, unsharded**:
   clear them (`git checkout HEAD -- <...>` / `rm <...>`) and `Write`
@@ -473,6 +487,96 @@ Combine the levers in order: **partial-hunk re-emit first** (less to type
 → helps cost *and* latency), **then** shard whatever's left if it's still
 a large batch. Sharding alone only buys latency, not fewer bytes.
 
+### 4. Oversized single file → serial sliced re-emit
+
+§3 shards *different files* across subagents in parallel. This lever
+solves the opposite problem: **one** file whose whole-file `Write` is too
+big for a single context (the *Do NOT use* size gate). Instead of
+skipping it, slice that one file and emit the slices **serially**, so no
+single context ever holds the whole file.
+
+This is **not** a speed lever — it's strictly slower than one `Write`
+would be (serial, plus per-slice overhead). Use it only when the file
+genuinely doesn't fit and a full rewrite is required (e.g. mixed
+provenance, lever 1's full-`Write` case). If a *partial* re-emit applies
+(small localized edit in a big file), prefer that — it already sidesteps
+the size gate without slicing.
+
+**Why slices can't all be `Write`:** `Write` replaces the *entire* file,
+so a second `Write` erases the first slice. Only the **first** slice is a
+`Write` (it creates the file); every later slice is an `Edit` that
+**appends** after the previous slice. Each `Edit`'s `old_string` must
+match the current on-disk tail, so slice K depends on slice K−1 — that
+dependency is exactly why it must be **serial**, not parallel.
+
+```
+0. Main: this is a single dest, so confirm the destructive clear (step 2)
+   applies. Snapshot the source so slices can be read after the dest is
+   cleared:
+   - source == dest (the usual case): cp the file to a scratch path first
+     (cp is fine — it only preserves the SOURCE; it does not produce the
+     re-attributed destination bytes). Clear the dest (step 3).
+   - source != dest: leave the source in place; no copy needed.
+   wc -l <source-snapshot>      # total lines, to assign ranges — main
+                                #   never loads the content itself
+1. Main: split into slices at roughly equal LINE intervals — this is
+   purely positional (line numbers from `wc -l`), so main still never
+   reads the content. Don't try to pick "nice" boundaries; main can't see
+   the lines to judge them. Anchor uniqueness is handled entirely by the
+   subagent in step 3 (it widens its anchor as needed). Record [start,end]
+   line ranges, in order.
+2. Main → subagent 1 (serial): "Read(<snapshot>, offset=start1, limit=len1),
+   then Write(<dest>, <those exact bytes>)." Subagent loads only slice 1.
+3. Main → subagent K (K≥2, one at a time, in order): "Read(<snapshot>,
+   offset=startK, limit=lenK). Read the last few lines already in <dest>
+   for your anchor. Then Edit(<dest>, old_string=<that on-disk tail>,
+   new_string=<same tail> + <slice K>)." The append leaves earlier slices
+   untouched. Widen the anchor until old_string matches exactly once.
+   (Reading <dest> here is NOT the forbidden "re-read the destination" in
+   Red Flags. That ban is about reading a *cleared* dest to recover bytes
+   you should have snapshotted. Here you read the *partially-built* dest
+   only to locate the append point, and its content came from the prior
+   subagent's own `Write`/`Edit` — AI output, not a human edit or a
+   snapshot you skipped. Your slice's bytes still come from <snapshot>.)
+4. Main: after the last slice, verify the whole file reconstructs the
+   intended content (git diff / diff -q against the snapshot), then rm the
+   scratch snapshot and commit.
+```
+
+Rules specific to this lever:
+
+- **Serial, never parallel** — two subagents appending to the same file
+  collide. One returns before the next starts. (Contrast §3, where shards
+  are disjoint files and *do* run in parallel.)
+- **Anchor uniqueness at every seam.** The tail-of-previous-slice used as
+  `old_string` must be unique in the file built *so far*; widen it (more
+  lines, up the file to something distinctive) if not. A non-unique anchor
+  is the main failure mode here.
+- **Mind the seam newline.** Split slices only at line boundaries, and let
+  the anchor span the **complete final line** of the previous slice
+  (including its line terminator) so the join reproduces the snapshot
+  exactly. `Write` may normalize the file's trailing newline, so don't
+  assume the on-disk tail matches the snapshot byte-for-byte — read the
+  anchor from the **live `<dest>`** (step 3 already does this) and have
+  `new_string` reproduce the exact seam. A one-byte newline drift at a
+  seam is silent until the step 4 `diff`; deliberate seam handling avoids
+  the mid-way miss.
+- **Provenance is preserved** — every byte lands via `Write` or `Edit`, so
+  the hook attributes all of it to AI. The `cp` snapshot and final commit
+  touch no re-attributed bytes.
+- **Same subagent prerequisite as §3** — the hook must credit subagent
+  tool calls. If it only watches the top-level session, this lever does
+  not apply: its whole benefit is a fresh per-slice context, which only
+  separate subagents give you. Don't use it then.
+- **Atomicity / recovery** — a failed middle slice leaves the file
+  half-built, and for a tracked `source == dest` file the only correct
+  copy of the content now lives in the `cp` **snapshot** (that's why step
+  4 keeps it until verify passes). To recover: `cp <snapshot> <dest>` to
+  restore the source bytes (this is a restore of the *source*, not a
+  re-attributed write), then re-clear and restart the slice chain from
+  slice 1. Don't `rm` the snapshot until the final `diff` passes — it is
+  your only undo.
+
 ## Quick Reference
 
 | Step      | Action                                                          | Tool                   |
@@ -493,7 +597,10 @@ Stop and restart if you catch yourself about to:
   `git restore --source=<ref>` to retrieve what you just cleared
 - run `Read` on the just-cleared destination to "remind yourself"
   (load the **source** in step 1 — if you skipped that, abort and ask
-  the user to undo the clear)
+  the user to undo the clear). Exception: Performance §4's serial slicing
+  reads the *partially-built* dest only to find the append point — that's
+  fine, the bytes still come from the snapshot, not from re-reading
+  cleared content you forgot to load.
 - pipe one file's content into another via `bash` to apply a known
   transformation
 - write a Python / Node one-liner whose only purpose is to produce

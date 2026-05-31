@@ -106,6 +106,9 @@ re-attribution.
   thumb: skip if post-change file size > 50% of remaining context),
   while a partial re-emit types only the changed hunks, so it's gated on
   diff size, not file size — a large file with a small hand-edit is fine.
+  Even an oversized full rewrite isn't an automatic skip: it can be
+  sliced and re-emitted serially (Performance §4), so only a genuinely
+  unsliceable blob (one giant minified line, binary) is truly out.
 - You're trying to defeat a **fraud-aware** audit, not a KPI-tracking
   hook. This skill is for the latter — it doesn't lie about what was
   written, it just re-emits identical bytes through a different tool so
